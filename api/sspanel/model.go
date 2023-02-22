@@ -6,7 +6,7 @@ import "encoding/json"
 type NodeInfoResponse struct {
 	Group           int             `json:"node_group"`
 	Class           int             `json:"node_class"`
-	SpeedLimit      float64         `json:"node_speedlimit"`
+	SpeedLimit      float64         `json:"node_speedlimit,string"`
 	TrafficRate     float64         `json:"traffic_rate"`
 	MuOnly          int             `json:"mu_only"`
 	Sort            int             `json:"sort"`
