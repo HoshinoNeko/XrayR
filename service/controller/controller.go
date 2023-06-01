@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -75,6 +76,9 @@ func (c *Controller) Start() error {
 	if err != nil {
 		return err
 	}
+	if newNodeInfo.Port == 0 {
+		return errors.New("server port must > 0")
+	}
 	c.nodeInfo = newNodeInfo
 	c.Tag = c.buildNodeTag()
 
@@ -140,7 +144,7 @@ func (c *Controller) Start() error {
 	)
 
 	// Check cert service in need
-	if c.nodeInfo.EnableTLS {
+	if c.nodeInfo.EnableTLS && c.config.EnableREALITY == false {
 		c.tasks = append(c.tasks, periodicTask{
 			tag: "cert monitor",
 			Periodic: &task.Periodic{
@@ -178,10 +182,19 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	}
 
 	// First fetch Node Info
+	var nodeInfoChanged = true
 	newNodeInfo, err := c.apiClient.GetNodeInfo()
 	if err != nil {
-		log.Print(err)
-		return nil
+		if err.Error() == "NodeInfo no change" {
+			nodeInfoChanged = false
+			newNodeInfo = c.nodeInfo
+		} else {
+			log.Print(err)
+			return nil
+		}
+	}
+	if newNodeInfo.Port == 0 {
+		return errors.New("server port must > 0")
 	}
 
 	// Update User
@@ -197,9 +210,8 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		}
 	}
 
-	var nodeInfoChanged = false
 	// If nodeInfo changed
-	if !reflect.DeepEqual(c.nodeInfo, newNodeInfo) {
+	if nodeInfoChanged && !reflect.DeepEqual(c.nodeInfo, newNodeInfo) {
 		// Remove old tag
 		oldTag := c.Tag
 		err := c.removeOldTag(oldTag)
@@ -233,7 +245,9 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	// Check Rule
 	if !c.config.DisableGetRule {
 		if ruleList, err := c.apiClient.GetNodeRule(); err != nil {
-			log.Printf("Get rule list filed: %s", err)
+			if err.Error() != "detect_rules no change" {
+				log.Printf("Get rule list filed: %s", err)
+			}
 		} else if len(*ruleList) > 0 {
 			if err := c.UpdateRule(c.Tag, *ruleList); err != nil {
 				log.Print(err)
@@ -599,7 +613,7 @@ func (c *Controller) logPrefix() string {
 
 // Check Cert
 func (c *Controller) certMonitor() error {
-	if c.nodeInfo.EnableTLS {
+	if c.nodeInfo.EnableTLS && c.config.EnableREALITY == false {
 		switch c.config.CertConfig.CertMode {
 		case "dns", "http", "tls":
 			lego, err := mylego.New(c.config.CertConfig)
