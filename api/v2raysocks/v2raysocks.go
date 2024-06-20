@@ -151,7 +151,7 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	var nodeType string
 	switch c.NodeType {
-	case "V2ray", "Trojan", "Shadowsocks":
+	case "V2ray", "Vmess", "Vless", "Trojan", "Shadowsocks":
 		nodeType = strings.ToLower(c.NodeType)
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
@@ -183,7 +183,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	}
 
 	switch c.NodeType {
-	case "V2ray":
+	case "V2ray", "Vmess", "Vless":
 		nodeInfo, err = c.ParseV2rayNodeResponse(response)
 	case "Trojan":
 		nodeInfo, err = c.ParseTrojanNodeResponse(response)
@@ -205,7 +205,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	var nodeType string
 	switch c.NodeType {
-	case "V2ray", "Trojan", "Shadowsocks":
+	case "V2ray", "Vmess", "Vless", "Trojan", "Shadowsocks":
 		nodeType = strings.ToLower(c.NodeType)
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
@@ -243,20 +243,27 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 			user.Passwd = response.Get("data").GetIndex(i).Get("shadowsocks_user").Get("secret").MustString()
 			user.Method = response.Get("data").GetIndex(i).Get("shadowsocks_user").Get("cipher").MustString()
 			user.SpeedLimit = response.Get("data").GetIndex(i).Get("shadowsocks_user").Get("speed_limit").MustUint64() * 1000000 / 8
+			user.DeviceLimit = response.Get("data").GetIndex(i).Get("shadowsocks_user").Get("device_limit").MustInt()
 		case "Trojan":
 			user.UUID = response.Get("data").GetIndex(i).Get("trojan_user").Get("password").MustString()
 			user.Email = response.Get("data").GetIndex(i).Get("trojan_user").Get("password").MustString()
 			user.SpeedLimit = response.Get("data").GetIndex(i).Get("trojan_user").Get("speed_limit").MustUint64() * 1000000 / 8
-		case "V2ray":
+			user.DeviceLimit = response.Get("data").GetIndex(i).Get("trojan_user").Get("device_limit").MustInt()
+		case "V2ray", "Vmess", "Vless":
 			user.UUID = response.Get("data").GetIndex(i).Get("v2ray_user").Get("uuid").MustString()
 			user.Email = response.Get("data").GetIndex(i).Get("v2ray_user").Get("email").MustString()
 			user.AlterID = uint16(response.Get("data").GetIndex(i).Get("v2ray_user").Get("alter_id").MustUint64())
 			user.SpeedLimit = response.Get("data").GetIndex(i).Get("v2ray_user").Get("speed_limit").MustUint64() * 1000000 / 8
+			user.DeviceLimit = response.Get("data").GetIndex(i).Get("v2ray_user").Get("device_limit").MustInt()
 		}
 		if c.SpeedLimit > 0 {
 			user.SpeedLimit = uint64((c.SpeedLimit * 1000000) / 8)
 		}
-		user.DeviceLimit = c.DeviceLimit
+
+		if c.DeviceLimit > 0 {
+			user.DeviceLimit = c.DeviceLimit
+		}
+
 		userList[i] = user
 	}
 	return &userList, nil
@@ -292,11 +299,7 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 // GetNodeRule implements the API interface
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 	ruleList := c.LocalRuleList
-	if c.NodeType != "V2ray" {
-		return &ruleList, nil
-	}
 
-	// Only support the rule for v2ray
 	// fix: reuse config response
 	c.access.Lock()
 	defer c.access.Unlock()
@@ -398,14 +401,6 @@ func (c *APIClient) ParseSSNodeResponse(nodeInfoResponse *simplejson.Json) (*api
 	// Shadowsocks 2022
 	if C.Contains(shadowaead_2022.List, method) {
 		serverPsk = inboundInfo.Get("settings").Get("password").MustString()
-	} else {
-		userInfo, err := c.GetUserList()
-		if err != nil {
-			return nil, err
-		}
-		if len(*userInfo) > 0 {
-			method = (*userInfo)[0].Method
-		}
 	}
 
 	// Create GeneralNodeInfo
