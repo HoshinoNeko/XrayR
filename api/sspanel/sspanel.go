@@ -833,27 +833,40 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 	return nodeInfo, nil
 }
 
-// compareVersion, version1 > version2 return 1, version1 < version2 return -1, 0 means equal
+// compareVersion, version1 > version2 return 1, version1 < version2 return -1, 0 means equal add support to latest sspanel version like 25.1.0
 func compareVersion(version1, version2 string) int {
-	n, m := len(version1), len(version2)
-	i, j := 0, 0
-	for i < n || j < m {
-		x := 0
-		for ; i < n && version1[i] != '.'; i++ {
-			x = x*10 + int(version1[i]-'0')
-		}
-		i++ // jump dot
-		y := 0
-		for ; j < m && version2[j] != '.'; j++ {
-			y = y*10 + int(version2[j]-'0')
-		}
-		j++ // jump dot
-		if x > y {
-			return 1
-		}
-		if x < y {
-			return -1
-		}
-	}
-	return 0
+    // Split versions into components
+    v1Parts := strings.Split(version1, ".")
+    v2Parts := strings.Split(version2, ".")
+
+    // Compare each component
+    for i := 0; i < 3; i++ {
+        // Get component for version1 (default 0 if missing)
+        var num1 int
+        if i < len(v1Parts) {
+            num1, _ = strconv.Atoi(v1Parts[i])
+            // If it's the first component (year) and 4 digits, convert to 2 digits
+            if i == 0 && num1 >= 2000 {
+                num1 -= 2000
+            }
+        }
+
+        // Get component for version2 (default 0 if missing)
+        var num2 int
+        if i < len(v2Parts) {
+            num2, _ = strconv.Atoi(v2Parts[i])
+            // If it's the first component (year) and 4 digits, convert to 2 digits
+            if i == 0 && num2 >= 2000 {
+                num2 -= 2000
+            }
+        }
+
+        // Compare
+        if num1 > num2 {
+            return 1
+        } else if num1 < num2 {
+            return -1
+        }
+    }
+    return 0
 }
