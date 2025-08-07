@@ -1,4 +1,4 @@
-name: Build and Publish Multi-arch Docker Image Test
+vname: Build and Publish Multi-arch Docker Image Test
 
 on:
   release:
@@ -143,25 +143,26 @@ jobs:
 
       - name: Prepare Dockerfile
         run: |
-          dockerfile_name="Dockerfile.${{ steps.platform.outputs.os }}_${{ steps.platform.outputs.arch }}"
+          normalized_arch=$(echo "${{ steps.platform.outputs.arch }}" | sed 's|/||g')
+          dockerfile_name="Dockerfile.${{ steps.platform.outputs.os }}.${normalized_arch}"
 
           if [ "${{ steps.platform.outputs.os }}" = "windows" ]; then
-            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo 'ENTRYPOINT ["XrayR.exe", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > Dockerfile.${dockerfile_name}
+            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> Dockerfile.${dockerfile_name}
+            echo 'ENTRYPOINT ["XrayR.exe", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${dockerfile_name}
           else
-            echo "FROM alpine" > Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo "RUN mkdir /etc/XrayR/" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo "COPY release/XrayR-linux-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
-            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo "FROM alpine" > Dockerfile.${dockerfile_name}
+            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> Dockerfile.${dockerfile_name}
+            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> Dockerfile.${dockerfile_name}
+            echo "RUN mkdir /etc/XrayR/" >> Dockerfile.${dockerfile_name}
+            echo "COPY release/XrayR-linux-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> Dockerfile.${dockerfile_name}
+            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${dockerfile_name}
           fi
 
       - name: Build and push platform-specific image
         uses: docker/build-push-action@v4
         with:
-          file: Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+          file: Dockerfile.${dockerfile_name}
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
