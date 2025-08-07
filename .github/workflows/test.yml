@@ -147,22 +147,22 @@ jobs:
           dockerfile_name="Dockerfile.${{ steps.platform.outputs.os }}.${normalized_arch}"
 
           if [ "${{ steps.platform.outputs.os }}" = "windows" ]; then
-            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > Dockerfile.${dockerfile_name}
-            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> Dockerfile.${dockerfile_name}
-            echo 'ENTRYPOINT ["XrayR.exe", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${dockerfile_name}
+            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > ${dockerfile_name}
+            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> ${dockerfile_name}
+            echo 'ENTRYPOINT ["XrayR.exe", "--config", "/etc/XrayR/config.yml"]' >> ${dockerfile_name}
           else
-            echo "FROM alpine" > Dockerfile.${dockerfile_name}
-            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> Dockerfile.${dockerfile_name}
-            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> Dockerfile.${dockerfile_name}
-            echo "RUN mkdir /etc/XrayR/" >> Dockerfile.${dockerfile_name}
-            echo "COPY release/XrayR-linux-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> Dockerfile.${dockerfile_name}
-            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${dockerfile_name}
+            echo "FROM alpine" > ${dockerfile_name}
+            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> ${dockerfile_name}
+            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> ${dockerfile_name}
+            echo "RUN mkdir /etc/XrayR/" >> ${dockerfile_name}
+            echo "COPY release/XrayR-linux-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> ${dockerfile_name}
+            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> ${dockerfile_name}
           fi
 
       - name: Build and push platform-specific image
         uses: docker/build-push-action@v4
         with:
-          file: Dockerfile.${dockerfile_name}
+          file: ${dockerfile_name}
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
