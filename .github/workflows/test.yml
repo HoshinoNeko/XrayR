@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.determine-tag.outputs.tag }}
+      repo_name: ${{ steps.set-repo-name.outputs.repo_name }}
     steps:
       - name: Determine tag
         id: determine-tag
@@ -38,7 +39,10 @@ jobs:
         run: |
           normalized_arch=$(echo "${{ matrix.platform }}" | awk -F/ '{print $NF}' | sed 's/v//')
           echo "normalized_arch=${normalized_arch}" >> $GITHUB_OUTPUT
-
+      - name: Set repository name
+        id: set-repo-name
+        run: |
+          echo "repo_name=hos/xrayr" >> $GITHUB_OUTPUT
 
   build-binaries:
     needs: setup
@@ -138,29 +142,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract platform info
+      - name: Extract and normalize platform info
         id: platform
         run: |
           IFS='/' read -r os arch <<< "${{ matrix.platform }}"
+          # 标准化架构名称 (arm/v6 → armv6)
+          normalized_arch=$(echo "$arch" | sed 's|/||g')
           echo "os=${os}" >> $GITHUB_OUTPUT
           echo "arch=${arch}" >> $GITHUB_OUTPUT
+          echo "normalized_arch=${normalized_arch}" >> $GITHUB_OUTPUT
 
       - name: Prepare Dockerfile
         run: |
-          normalized_arch=$(echo "${{ steps.platform.outputs.arch }}" | sed 's|/||g')
-          dockerfile_name="Dockerfile.${{ steps.platform.outputs.os }}.${normalized_arch}"
-
-          if [ "${{ steps.platform.outputs.os }}" = "windows" ]; then
-            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > ${dockerfile_name}
-            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> ${dockerfile_name}
-            echo 'ENTRYPOINT ["XrayR.exe", "--config", "/etc/XrayR/config.yml"]' >> ${dockerfile_name}
+       	  if [ "${{ steps.platform.outputs.os }}" = "windows" ]; then
+            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo 'ENTRYPOINT ["XrayR.exe", "--config", "C:\\etc\\XrayR\\config.yml"]' >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
           else
-            echo "FROM alpine" > ${dockerfile_name}
-            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> ${dockerfile_name}
-            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> ${dockerfile_name}
-            echo "RUN mkdir /etc/XrayR/" >> ${dockerfile_name}
-            echo "COPY release/XrayR-linux-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> ${dockerfile_name}
-            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> ${dockerfile_name}
+            echo "FROM alpine" > Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo "RUN mkdir /etc/XrayR/" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo "COPY release/XrayR-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
+            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
           fi
 
       - name: Build and push platform-specific image
@@ -171,7 +175,7 @@ jobs:
           push: true
           tags: |
             ${{ env.DOCKERHUB_REPO }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.normalized_arch }}
-            ghcr.io/${{ needs.setup.outputs.repo_name }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.normalized_arch }}
+            ${{ env.GHCR_REPO }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.normalized_arch }}
 
   create-manifest:
     needs: [setup, build-and-push]
