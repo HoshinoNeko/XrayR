@@ -166,12 +166,12 @@ jobs:
       - name: Build and push platform-specific image
         uses: docker/build-push-action@v4
         with:
-          file: Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.normalized_arch.outputs.normalized_arch }}
+          file: Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ${{ env.DOCKERHUB_REPO }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.normalized_arch.outputs.normalized_arch }}
-            ghcr.io/${{ needs.setup.outputs.repo_name }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.normalized_arch.outputs.normalized_arch }}
+            ${{ env.DOCKERHUB_REPO }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.normalized_arch }}
+            ghcr.io/${{ needs.setup.outputs.repo_name }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.normalized_arch }}
 
   create-manifest:
     needs: [setup, build-and-push]
