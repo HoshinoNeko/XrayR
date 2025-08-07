@@ -82,7 +82,7 @@ jobs:
           mv $output_name release/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.target.os }}-${{ matrix.target.arch }}
           path: release/
