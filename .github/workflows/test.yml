@@ -1,0 +1,221 @@
+name: Build and Publish Multi-arch Docker Image Test
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: ''
+        required: false
+
+env:
+  DOCKERHUB_REPO: hoshinoneko/xrayr
+  # Good github env format drove me mad :). If u get a upper letter in your user name dont forget to give it a try
+  GHCR_REPO: ghcr.io/${{ format('{0}', github.repository).toLowerCase() }}
+  BASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.determine-tag.outputs.tag }}
+    steps:
+      - name: Determine tag
+        id: determine-tag
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            echo "Using release tag: ${{ github.event.release.tag_name }}"
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ inputs.tag }}" ]; then
+            echo "Using input tag: ${{ inputs.tag }}"
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "Using branch name: ${{ github.ref_name }}"
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+  build-binaries:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+            goarch: arm64
+          - os: linux
+            arch: armv7
+            goarch: arm
+            goarm: 7
+          - os: linux
+            arch: armv6
+            goarch: arm
+            goarm: 6
+          - os: linux
+            arch: s390x
+          - os: windows
+            arch: amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24.1'
+
+      - name: Cross-compile binaries
+        env:
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.goarch || matrix.target.arch }}
+          GOARM: ${{ matrix.target.goarm || '' }}
+        run: |
+          output_name="XrayR-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+          if [ "${{ matrix.target.os }}" = "windows" ]; then
+            output_name="$output_name.exe"
+          fi
+          CGO_ENABLED=0 go build -v -o $output_name -trimpath -ldflags "-s -w -buildid="
+          mkdir -p release
+          mv $output_name release/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: binaries-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: release/
+
+  build-and-push:
+    needs: [setup, build-binaries]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [
+          linux/amd64,
+          linux/arm64,
+          linux/arm/v7,
+          linux/arm/v6,
+          linux/s390x,
+          windows/amd64
+        ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download binaries
+        uses: actions/download-artifact@v3
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: release/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract platform info
+        id: platform
+        run: |
+          IFS='/' read -r os arch <<< "${{ matrix.platform }}"
+          echo "os=${os}" >> $GITHUB_OUTPUT
+          echo "arch=${arch}" >> $GITHUB_OUTPUT
+
+      - name: Prepare Dockerfile
+        run: |
+          if [ "${{ steps.platform.outputs.os }}" = "windows" ]; then
+            echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo 'ENTRYPOINT ["XrayR.exe", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+          else
+            echo "FROM alpine" > Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo "RUN mkdir /etc/XrayR/" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo "COPY release/XrayR-linux-${{ steps.platform.outputs.arch }} /usr/local/bin/XrayR" >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+            echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+          fi
+
+      - name: Build and push platform-specific image
+        uses: docker/build-push-action@v4
+        with:
+          file: Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.arch }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_REPO }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.arch }}
+            ${{ env.GHCR_REPO }}:${{ needs.setup.outputs.tag }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.arch }}
+
+  create-manifest:
+    needs: [setup, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push Docker Hub manifest
+        run: |
+          # Create manifest
+          docker manifest create $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }} \
+            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-amd64 \
+            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-arm64 \
+            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv7 \
+            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv6 \
+            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-s390x \
+            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-windows-amd64
+
+          docker manifest push $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}
+
+          # If ref is release change the latest tag
+          if [[ "${{ github.event.release.tag_name }}" ]]; then
+            docker manifest create $DOCKERHUB_REPO:latest \
+              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-amd64 \
+              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-arm64 \
+              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv7 \
+              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv6 \
+              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-s390x \
+              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-windows-amd64
+
+            docker manifest push $DOCKERHUB_REPO:latest
+          fi
+
+      - name: Create and push GHCR manifest
+        run: |
+          # Create manifest
+          docker manifest create $GHCR_REPO:${{ needs.setup.outputs.tag }} \
+            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-amd64 \
+            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-arm64 \
+            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-armv7 \
+            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-armv6 \
+            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-s390x \
+            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-windows-amd64
+
+          docker manifest push $GHCR_REPO:${{ needs.setup.outputs.tag }}
