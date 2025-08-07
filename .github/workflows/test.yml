@@ -1,4 +1,4 @@
-vname: Build and Publish Multi-arch Docker Image Test
+name: Build and Publish Multi-arch Docker Image Test
 
 on:
   release:
