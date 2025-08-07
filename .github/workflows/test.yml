@@ -12,7 +12,7 @@ on:
 env:
   DOCKERHUB_REPO: hoshinoneko/xrayr
   # Good github env format drove me mad :). If u get a upper letter in your user name dont forget to give it a try
-  GHCR_REPO: ghcr.io/${{ format('{0}', github.repository).toLowerCase() }}
+  GHCR_REPO: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
   BASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
 jobs:
