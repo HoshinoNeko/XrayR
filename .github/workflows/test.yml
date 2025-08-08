@@ -167,7 +167,7 @@ jobs:
             echo "RUN apk --update --no-cache add tzdata ca-certificates \\" >> "Dockerfile.$os.$normalized_arch"
             echo " && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime" >> "Dockerfile.$os.$normalized_arch"
             echo "RUN mkdir /etc/XrayR/" >> "Dockerfile.$os.$normalized_arch"
-            echo "COPY release/XrayR-$os-$arch /usr/local/bin/XrayR" >> "Dockerfile.$os.$normalized_arch"
+            echo "COPY release/XrayR-$os-$normalized_arch /usr/local/bin/XrayR" >> "Dockerfile.$os.$normalized_arch"
             echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> "Dockerfile.$os.$normalized_arch"
           fi
           echo "Dockerfile directory: $(pwd)"
