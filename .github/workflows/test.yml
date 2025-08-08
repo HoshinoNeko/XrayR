@@ -170,6 +170,7 @@ jobs:
             echo "COPY release/XrayR-$os-$arch /usr/local/bin/XrayR" >> "Dockerfile.$os.$normalized_arch"
             echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> "Dockerfile.$os.$normalized_arch"
           fi
+          ls -lha Dockerfile.$os.$normalized_arch
 
       - name: Build and push platform-specific image
         uses: docker/build-push-action@v4
