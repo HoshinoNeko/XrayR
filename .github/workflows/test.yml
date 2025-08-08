@@ -42,7 +42,7 @@ jobs:
       - name: Set repository name
         id: set-repo-name
         run: |
-          echo "repo_name=hos/xrayr" >> $GITHUB_OUTPUT
+          echo "repo_name=hoshinoneko/xrayr" >> $GITHUB_OUTPUT
 
   build-binaries:
     needs: setup
@@ -157,7 +157,7 @@ jobs:
           os="${{ steps.platform.outputs.os }}"
           normalized_arch="${{ steps.platform.outputs.normalized_arch }}"
           arch="${{ steps.platform.outputs.arch }}"
-    
+          echo Preaped Dockfile Dockerfile.$os.$normalized_arch
           if [ "$os" = "windows" ]; then
             echo "FROM mcr.microsoft.com/windows/nanoserver:1809" > "Dockerfile.$os.$normalized_arch"
             echo "COPY release/XrayR-windows-amd64.exe XrayR.exe" >> "Dockerfile.$os.$normalized_arch"
