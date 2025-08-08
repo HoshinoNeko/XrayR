@@ -210,39 +210,97 @@ jobs:
 
       - name: Create and push Docker Hub manifest
         run: |
-          # Create manifest
-          docker manifest create $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }} \
-            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-amd64 \
-            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-arm64 \
-            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv7 \
-            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv6 \
-            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-s390x \
-            --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-windows-amd64
-
-          docker manifest push $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}
-
-          # If ref is release change the latest tag
-          if [[ "${{ github.event.release.tag_name }}" ]]; then
-            docker manifest create $DOCKERHUB_REPO:latest \
-              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-amd64 \
-              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-arm64 \
-              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv7 \
-              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-armv6 \
-              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-linux-s390x \
-              --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-windows-amd64
-
-            docker manifest push $DOCKERHUB_REPO:latest
+          # 检查并删除现有的 manifest（如果存在）
+          docker manifest rm $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }} 2>/dev/null || true
+          
+          # 检查镜像是否存在，只添加存在的镜像
+          images_to_add=""
+          platforms=("linux-amd64" "linux-arm64" "linux-armv7" "linux-armv6" "linux-s390x" "windows-amd64")
+          
+          for platform in "${platforms[@]}"; do
+            if docker manifest inspect $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-$platform >/dev/null 2>&1; then
+              echo "Found image for platform: $platform"
+              images_to_add="$images_to_add --amend $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-$platform"
+            else
+              echo "Image not found for platform: $platform, skipping"
+            fi
+          done
+          
+          if [ -n "$images_to_add" ]; then
+            # 使用 buildx imagetools 创建 manifest（更可靠）
+            image_list=""
+            for platform in "${platforms[@]}"; do
+              if docker manifest inspect $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-$platform >/dev/null 2>&1; then
+                image_list="$image_list $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}-$platform"
+              fi
+            done
+          
+            docker buildx imagetools create -t $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }} $image_list
+            echo "Successfully created manifest for $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}"
+          else
+            echo "No valid images found to create manifest"
+            exit 1
           fi
+          
+          # 如果是 release 事件，创建 latest 标签
+          if [[ "${{ github.event_name }}" == "release" || "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "Creating latest tag manifest..."
+            docker buildx imagetools create -t $DOCKERHUB_REPO:latest $image_list
+            echo "Successfully created latest manifest"
+          else
+            echo "Not a release event, skipping latest tag creation"
+          fi
+        env:
+          DOCKERHUB_REPO: ${{ env.DOCKERHUB_REPO }}
 
       - name: Create and push GHCR manifest
         run: |
-          # Create manifest
-          docker manifest create $GHCR_REPO:${{ needs.setup.outputs.tag }} \
-            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-amd64 \
-            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-arm64 \
-            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-armv7 \
-            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-armv6 \
-            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-linux-s390x \
-            --amend $GHCR_REPO:${{ needs.setup.outputs.tag }}-windows-amd64
+          # 检查并删除现有的 manifest（如果存在）
+          docker manifest rm $GHCR_REPO:${{ needs.setup.outputs.tag }} 2>/dev/null || true
+          
+          # 检查镜像是否存在，只添加存在的镜像
+          platforms=("linux-amd64" "linux-arm64" "linux-armv7" "linux-armv6" "linux-s390x" "windows-amd64")
+          image_list=""
+          
+          for platform in "${platforms[@]}"; do
+            if docker manifest inspect $GHCR_REPO:${{ needs.setup.outputs.tag }}-$platform >/dev/null 2>&1; then
+              echo "Found GHCR image for platform: $platform"
+              image_list="$image_list $GHCR_REPO:${{ needs.setup.outputs.tag }}-$platform"
+            else
+              echo "GHCR image not found for platform: $platform, skipping"
+            fi
+          done
+          
+          if [ -n "$image_list" ]; then
+            docker buildx imagetools create -t $GHCR_REPO:${{ needs.setup.outputs.tag }} $image_list
+            echo "Successfully created GHCR manifest for $GHCR_REPO:${{ needs.setup.outputs.tag }}"
+          
+            # 如果是 release 事件，创建 latest 标签
+            if [[ "${{ github.event_name }}" == "release" || "${{ github.ref }}" == refs/tags/* ]]; then
+              echo "Creating GHCR latest tag manifest..."
+              docker buildx imagetools create -t $GHCR_REPO:latest $image_list
+              echo "Successfully created GHCR latest manifest"
+            fi
+          else
+            echo "No valid GHCR images found to create manifest"
+            exit 1
+          fi
+        env:
+          GHCR_REPO: ${{ env.GHCR_REPO }}
 
-          docker manifest push $GHCR_REPO:${{ needs.setup.outputs.tag }}
+      - name: Verify manifests
+        run: |
+          echo "=== Verifying Docker Hub manifest ==="
+          docker manifest inspect $DOCKERHUB_REPO:${{ needs.setup.outputs.tag }}
+          
+          echo "=== Verifying GHCR manifest ==="
+          docker manifest inspect $GHCR_REPO:${{ needs.setup.outputs.tag }}
+          
+          if [[ "${{ github.event_name }}" == "release" || "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "=== Verifying latest tags ==="
+            docker manifest inspect $DOCKERHUB_REPO:latest
+            docker manifest inspect $GHCR_REPO:latest
+          fi
+        env:
+          DOCKERHUB_REPO: ${{ env.DOCKERHUB_REPO }}
+          GHCR_REPO: ${{ env.GHCR_REPO }}
