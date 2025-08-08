@@ -177,6 +177,7 @@ jobs:
       - name: Build and push platform-specific image
         uses: docker/build-push-action@v4
         with:
+          context: .
           file: Dockerfile.${{ steps.platform.outputs.os }}.${{ steps.platform.outputs.normalized_arch }}
           platforms: ${{ matrix.platform }}
           push: true
