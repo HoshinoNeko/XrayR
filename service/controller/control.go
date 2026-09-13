@@ -83,6 +83,9 @@ func (c *Controller) addUsers(users []*protocol.User, tag string) error {
 }
 
 func (c *Controller) removeUsers(users []string, tag string) error {
+	if err := c.dispatcher.Limiter.RemoveInboundUsers(tag, users); err != nil {
+		return err
+	}
 	handler, err := c.ibm.GetHandler(context.Background(), tag)
 	if err != nil {
 		return fmt.Errorf("no such inbound tag: %s", err)
@@ -121,15 +124,6 @@ func (c *Controller) getTraffic(email string) (up int64, down int64, upCounter s
 		downCounter = nil
 	}
 	return up, down, upCounter, downCounter
-}
-
-func (c *Controller) resetTraffic(upCounterList *[]stats.Counter, downCounterList *[]stats.Counter) {
-	for _, upCounter := range *upCounterList {
-		upCounter.Set(0)
-	}
-	for _, downCounter := range *downCounterList {
-		downCounter.Set(0)
-	}
 }
 
 func (c *Controller) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalDeviceLimitConfig *limiter.GlobalDeviceLimitConfig) error {

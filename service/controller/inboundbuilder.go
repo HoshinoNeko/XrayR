@@ -119,10 +119,12 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 		}
 
 		proxySetting.NetworkList = &conf.NetworkList{"tcp", "udp"}
-		proxySetting.IVCheck = true
-		if config.DisableIVCheck {
-			proxySetting.IVCheck = false
+	case "Hysteria2", "Hysteria":
+		if nodeInfo.Hysteria2 == nil || nodeInfo.Hysteria2.Version != 2 {
+			return nil, fmt.Errorf("hysteria2 version must be 2")
 		}
+		protocol = "hysteria"
+		proxySetting = &conf.HysteriaServerConfig{Version: 2}
 
 	case "dokodemo-door":
 		protocol = "dokodemo-door"
@@ -189,19 +191,30 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 			Host: nodeInfo.Host,
 		}
 		streamSetting.SplitHTTPSettings = splithttpSetting
+	case "hysteria":
+		if nodeInfo.Hysteria2 == nil {
+			return nil, fmt.Errorf("hysteria2 config is required")
+		}
+		streamSetting.HysteriaSettings = &conf.HysteriaConfig{
+			Version:        nodeInfo.Hysteria2.Version,
+			UdpIdleTimeout: nodeInfo.Hysteria2.UDPIdleTimeout,
+			Masquerade:     nodeInfo.Hysteria2.Masquerade,
+		}
+		streamSetting.FinalMask = nodeInfo.Hysteria2.FinalMask
 	}
 	streamSetting.Network = &transportProtocol
 
 	// Build TLS and REALITY settings
 	var isREALITY bool
-	if config.DisableLocalREALITYConfig {
+	isHysteria2 := nodeInfo.NodeType == "Hysteria2" || nodeInfo.NodeType == "Hysteria"
+	if !isHysteria2 && config.DisableLocalREALITYConfig {
 		if nodeInfo.REALITYConfig != nil && nodeInfo.EnableREALITY {
 			isREALITY = true
 			streamSetting.Security = "reality"
 
 			r := nodeInfo.REALITYConfig
 			streamSetting.REALITYSettings = &conf.REALITYConfig{
-				Show:         config.REALITYConfigs.Show,
+				Show:         nodeInfo.Show,
 				Dest:         []byte(`"` + r.Dest + `"`),
 				Xver:         r.ProxyProtocolVer,
 				ServerNames:  r.ServerNames,
@@ -212,7 +225,7 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 				ShortIds:     r.ShortIds,
 			}
 		}
-	} else if config.EnableREALITY && config.REALITYConfigs != nil {
+	} else if !isHysteria2 && config.EnableREALITY && config.REALITYConfigs != nil {
 		isREALITY = true
 		streamSetting.Security = "reality"
 
@@ -229,7 +242,10 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 		}
 	}
 
-	if !isREALITY && nodeInfo.EnableTLS && config.CertConfig.CertMode != "none" {
+	if isHysteria2 && (config.CertConfig == nil || config.CertConfig.CertMode == "none") {
+		return nil, fmt.Errorf("hysteria2 requires CertConfig with a TLS certificate")
+	}
+	if !isREALITY && nodeInfo.EnableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
 		streamSetting.Security = "tls"
 		certFile, keyFile, err := getCertFile(config.CertConfig)
 		if err != nil {

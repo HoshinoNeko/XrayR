@@ -1,6 +1,10 @@
 package sspanel
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/xtls/xray-core/infra/conf"
+)
 
 // NodeInfoResponse is the response of node
 type NodeInfoResponse struct {
@@ -13,26 +17,42 @@ type NodeInfoResponse struct {
 	Type            string          `json:"type"`
 	CustomConfig    json.RawMessage `json:"custom_config"`
 	Version         string          `json:"version"`
+	Enabled         *bool           `json:"enabled,omitempty"`
 }
 
 type CustomConfig struct {
-	OffsetPortNode string          `json:"offset_port_node"`
-	Host           string          `json:"host"`
-	Method         string          `json:"method"`
-	TLS            string          `json:"tls"`
-	EnableVless    string          `json:"enable_vless"`
-	Network        string          `json:"network"`
-	Security       string          `json:"security"`
-	Path           string          `json:"path"`
-	VerifyCert     bool            `json:"verify_cert"`
-	Obfs           string          `json:"obfs"`
-	Header         json.RawMessage `json:"header"`
-	AllowInsecure  string          `json:"allow_insecure"`
-	Servicename    string          `json:"servicename"`
-	EnableXtls     string          `json:"enable_xtls"`
-	Flow           string          `json:"flow"`
-	EnableREALITY  bool            `json:"enable_reality"`
-	RealityOpts    *REALITYConfig  `json:"reality-opts"`
+	OffsetPortNode string           `json:"offset_port_node"`
+	Host           string           `json:"host"`
+	Method         string           `json:"method"`
+	TLS            string           `json:"tls"`
+	EnableVless    string           `json:"enable_vless"`
+	Network        string           `json:"network"`
+	Security       string           `json:"security"`
+	Path           string           `json:"path"`
+	VerifyCert     bool             `json:"verify_cert"`
+	Obfs           string           `json:"obfs"`
+	Header         json.RawMessage  `json:"header"`
+	AllowInsecure  any              `json:"allow_insecure"`
+	Servicename    string           `json:"servicename"`
+	EnableXtls     string           `json:"enable_xtls"`
+	Flow           string           `json:"flow"`
+	EnableREALITY  bool             `json:"enable_reality"`
+	RealityOpts    *REALITYConfig   `json:"reality-opts"`
+	Hysteria2      *Hysteria2Config `json:"hysteria2"`
+}
+
+type Hysteria2Config struct {
+	Version        int32              `json:"version"`
+	UDPIdleTimeout int64              `json:"udpIdleTimeout"`
+	Masquerade     conf.Masquerade    `json:"masquerade"`
+	FinalMask      *conf.FinalMask    `json:"finalmask"`
+	PortHopping    *PortHoppingConfig `json:"portHopping"`
+}
+
+type PortHoppingConfig struct {
+	Enabled               bool   `json:"enabled"`
+	AutoConfigureFirewall bool   `json:"autoConfigureFirewall"`
+	Ports                 string `json:"ports"`
 }
 
 // UserResponse is the response of user
@@ -55,7 +75,8 @@ type Response struct {
 
 // PostData is the data structure of post data
 type PostData struct {
-	Data interface{} `json:"data"`
+	Data     interface{} `json:"data"`
+	ReportID string      `json:"report_id,omitempty"`
 }
 
 // SystemLoad is the data structure of system load

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -18,6 +19,7 @@ import (
 	"github.com/HoshinoNeko/XrayR/api"
 	"github.com/HoshinoNeko/XrayR/app/mydispatcher"
 	"github.com/HoshinoNeko/XrayR/common/mylego"
+	"github.com/HoshinoNeko/XrayR/common/porthopping"
 	"github.com/HoshinoNeko/XrayR/common/serverstatus"
 )
 
@@ -25,6 +27,11 @@ type LimitInfo struct {
 	end               int64
 	currentSpeedLimit int
 	originSpeedLimit  uint64
+}
+
+type trafficSnapshot struct {
+	uplink   int64
+	downlink int64
 }
 
 type Controller struct {
@@ -43,7 +50,12 @@ type Controller struct {
 	obm          outbound.Manager
 	stm          stats.Manager
 	dispatcher   *mydispatcher.DefaultDispatcher
+	portHopping  *porthopping.Manager
+	initErr      error
+	trafficBase  map[string]trafficSnapshot
+	stateMu      sync.Mutex
 	startAt      time.Time
+	suspended    bool
 	logger       *log.Entry
 }
 
@@ -59,17 +71,23 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 		"Type": api.Describe().NodeType,
 		"ID":   api.Describe().NodeID,
 	})
+	dispatcher, ok := server.GetFeature(routing.DispatcherType()).(*mydispatcher.DefaultDispatcher)
 	controller := &Controller{
-		server:     server,
-		config:     config,
-		apiClient:  api,
-		panelType:  panelType,
-		ibm:        server.GetFeature(inbound.ManagerType()).(inbound.Manager),
-		obm:        server.GetFeature(outbound.ManagerType()).(outbound.Manager),
-		stm:        server.GetFeature(stats.ManagerType()).(stats.Manager),
-		dispatcher: server.GetFeature(routing.DispatcherType()).(*mydispatcher.DefaultDispatcher),
-		startAt:    time.Now(),
-		logger:     logger,
+		server:      server,
+		config:      config,
+		apiClient:   api,
+		panelType:   panelType,
+		ibm:         server.GetFeature(inbound.ManagerType()).(inbound.Manager),
+		obm:         server.GetFeature(outbound.ManagerType()).(outbound.Manager),
+		stm:         server.GetFeature(stats.ManagerType()).(stats.Manager),
+		dispatcher:  dispatcher,
+		portHopping: porthopping.New(),
+		trafficBase: make(map[string]trafficSnapshot),
+		startAt:     time.Now(),
+		logger:      logger,
+	}
+	if !ok {
+		controller.initErr = errors.New("Xray instance does not use XrayR mydispatcher; accounting and limiting cannot be enforced")
 	}
 
 	return controller
@@ -77,22 +95,34 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 
 // Start implement the Start() function of the service interface
 func (c *Controller) Start() error {
+	if c.initErr != nil {
+		return c.initErr
+	}
 	c.clientInfo = c.apiClient.Describe()
 	// First fetch Node Info
 	newNodeInfo, err := c.apiClient.GetNodeInfo()
 	if err != nil {
 		return err
 	}
-	if newNodeInfo.Port == 0 {
+	if !newNodeInfo.Disabled && newNodeInfo.Port == 0 {
 		return errors.New("server port must > 0")
 	}
 	c.nodeInfo = newNodeInfo
 	c.Tag = c.buildNodeTag()
+	if newNodeInfo.Disabled {
+		c.suspended = true
+		c.logger.Print("Node is disabled in panel; waiting for re-enable")
+		return c.startPeriodicTasks()
+	}
 
 	// Add new tag
 	err = c.addNewTag(newNodeInfo)
 	if err != nil {
 		c.logger.Panic(err)
+		return err
+	}
+	if err := c.applyPortHopping(newNodeInfo); err != nil {
+		_ = c.removeOldTag(c.Tag)
 		return err
 	}
 	// Update user
@@ -104,14 +134,13 @@ func (c *Controller) Start() error {
 	// sync controller userList
 	c.userList = userInfo
 
-	err = c.addNewUser(userInfo, newNodeInfo)
-	if err != nil {
-		return err
-	}
-
 	// Add Limiter
 	if err := c.AddInboundLimiter(c.Tag, newNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
 		c.logger.Print(err)
+	}
+	err = c.addNewUser(userInfo, newNodeInfo)
+	if err != nil {
+		return err
 	}
 
 	// Add Rule Manager
@@ -125,16 +154,18 @@ func (c *Controller) Start() error {
 		}
 	}
 
-	// Init AutoSpeedLimitConfig
+	return c.startPeriodicTasks()
+}
+
+func (c *Controller) startPeriodicTasks() error {
 	if c.config.AutoSpeedLimitConfig == nil {
-		c.config.AutoSpeedLimitConfig = &AutoSpeedLimitConfig{0, 0, 0, 0}
+		c.config.AutoSpeedLimitConfig = &AutoSpeedLimitConfig{}
 	}
-	if c.config.AutoSpeedLimitConfig.Limit > 0 {
+	if c.config.AutoSpeedLimitConfig.Limit > 0 && c.limitedUsers == nil {
 		c.limitedUsers = make(map[api.UserInfo]LimitInfo)
 		c.warnedUsers = make(map[api.UserInfo]int)
 	}
 
-	// Add periodic tasks
 	c.tasks = append(c.tasks,
 		periodicTask{
 			tag: "node monitor",
@@ -150,7 +181,6 @@ func (c *Controller) Start() error {
 			}},
 	)
 
-	// Check cert service in need
 	if c.nodeInfo.EnableTLS && c.config.EnableREALITY == false {
 		c.tasks = append(c.tasks, periodicTask{
 			tag: "cert monitor",
@@ -160,7 +190,6 @@ func (c *Controller) Start() error {
 			}})
 	}
 
-	// Start periodic tasks
 	for i := range c.tasks {
 		c.logger.Printf("Start %s periodic task", c.tasks[i].tag)
 		go c.tasks[i].Start()
@@ -171,6 +200,12 @@ func (c *Controller) Start() error {
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	c.stateMu.Lock()
+	if err := c.flushTrafficCounters(); err != nil {
+		c.logger.Print(err)
+	}
+	c.stateMu.Unlock()
+	c.portHopping.Remove()
 	for i := range c.tasks {
 		if c.tasks[i].Periodic != nil {
 			if err := c.tasks[i].Periodic.Close(); err != nil {
@@ -187,6 +222,8 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 
 	// First fetch Node Info
 	var nodeInfoChanged = true
@@ -199,6 +236,77 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			c.logger.Print(err)
 			return nil
 		}
+	}
+	if newNodeInfo.Disabled {
+		if !c.suspended {
+			oldTag := c.Tag
+			flushErr := c.flushTrafficCounters()
+			c.portHopping.Remove()
+			_ = c.DeleteInboundLimiter(oldTag)
+			if err := c.removeOldTag(oldTag); err != nil {
+				c.logger.Print(err)
+			}
+			if flushErr == nil {
+				c.userList = nil
+				c.trafficBase = make(map[string]trafficSnapshot)
+			} else {
+				c.logger.Printf("Final traffic report deferred: %s", flushErr)
+			}
+			c.suspended = true
+			c.logger.Print("Node disabled; inbound, outbound and limiter removed")
+		} else if c.userList != nil {
+			if err := c.flushTrafficCounters(); err != nil {
+				c.logger.Printf("Retry final traffic report failed: %s", err)
+			} else {
+				c.userList = nil
+				c.trafficBase = make(map[string]trafficSnapshot)
+			}
+		}
+		c.nodeInfo = newNodeInfo
+		return nil
+	}
+	if c.suspended {
+		if c.userList != nil {
+			if err := c.flushTrafficCounters(); err != nil {
+				return fmt.Errorf("flush traffic before re-enable: %w", err)
+			}
+			c.userList = nil
+			c.trafficBase = make(map[string]trafficSnapshot)
+		}
+		if newNodeInfo.Port == 0 {
+			return errors.New("server port must > 0")
+		}
+		c.nodeInfo = newNodeInfo
+		c.Tag = c.buildNodeTag()
+		if err := c.addNewTag(newNodeInfo); err != nil {
+			return err
+		}
+		if err := c.applyPortHopping(newNodeInfo); err != nil {
+			_ = c.removeOldTag(c.Tag)
+			return err
+		}
+		newUserInfo, err := c.apiClient.GetUserList()
+		if err != nil {
+			c.portHopping.Remove()
+			_ = c.removeOldTag(c.Tag)
+			return err
+		}
+		if err := c.AddInboundLimiter(c.Tag, newNodeInfo.SpeedLimit, newUserInfo, c.config.GlobalDeviceLimitConfig); err != nil {
+			c.portHopping.Remove()
+			_ = c.removeOldTag(c.Tag)
+			return err
+		}
+		if err := c.addNewUser(newUserInfo, newNodeInfo); err != nil {
+			c.portHopping.Remove()
+			_ = c.DeleteInboundLimiter(c.Tag)
+			_ = c.removeOldTag(c.Tag)
+			return err
+		}
+		c.userList = newUserInfo
+		c.trafficBase = make(map[string]trafficSnapshot)
+		c.suspended = false
+		c.logger.Print("Node re-enabled")
+		return nil
 	}
 	if newNodeInfo.Port == 0 {
 		return errors.New("server port must > 0")
@@ -222,6 +330,11 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		if !reflect.DeepEqual(c.nodeInfo, newNodeInfo) {
 			// Remove old tag
 			oldTag := c.Tag
+			if err := c.flushTrafficCounters(); err != nil {
+				c.logger.Printf("Keep old node until final traffic is reported: %s", err)
+				return nil
+			}
+			c.portHopping.Remove()
 			err := c.removeOldTag(oldTag)
 			if err != nil {
 				c.logger.Print(err)
@@ -237,8 +350,20 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			// Add new tag
 			c.nodeInfo = newNodeInfo
 			c.Tag = c.buildNodeTag()
+			c.trafficBase = make(map[string]trafficSnapshot)
 			err = c.addNewTag(newNodeInfo)
 			if err != nil {
+				_ = c.DeleteInboundLimiter(oldTag)
+				c.userList = nil
+				c.suspended = true
+				c.logger.Print(err)
+				return nil
+			}
+			if err = c.applyPortHopping(newNodeInfo); err != nil {
+				_ = c.removeOldTag(c.Tag)
+				_ = c.DeleteInboundLimiter(oldTag)
+				c.userList = nil
+				c.suspended = true
 				c.logger.Print(err)
 				return nil
 			}
@@ -267,14 +392,22 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	}
 
 	if nodeInfoChanged {
-		err = c.addNewUser(newUserInfo, newNodeInfo)
-		if err != nil {
+		// Add Limiter
+		if err := c.AddInboundLimiter(c.Tag, newNodeInfo.SpeedLimit, newUserInfo, c.config.GlobalDeviceLimitConfig); err != nil {
+			c.portHopping.Remove()
+			_ = c.removeOldTag(c.Tag)
+			c.userList = nil
+			c.suspended = true
 			c.logger.Print(err)
 			return nil
 		}
-
-		// Add Limiter
-		if err := c.AddInboundLimiter(c.Tag, newNodeInfo.SpeedLimit, newUserInfo, c.config.GlobalDeviceLimitConfig); err != nil {
+		err = c.addNewUser(newUserInfo, newNodeInfo)
+		if err != nil {
+			c.portHopping.Remove()
+			_ = c.DeleteInboundLimiter(c.Tag)
+			_ = c.removeOldTag(c.Tag)
+			c.userList = nil
+			c.suspended = true
 			c.logger.Print(err)
 			return nil
 		}
@@ -291,15 +424,19 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 				err := c.removeUsers(deletedEmail, c.Tag)
 				if err != nil {
 					c.logger.Print(err)
+					return nil
+				}
+				for _, email := range deletedEmail {
+					delete(c.trafficBase, email)
 				}
 			}
 			if len(added) > 0 {
+				if err := c.UpdateInboundLimiter(c.Tag, &added); err != nil {
+					c.logger.Print(err)
+					return nil
+				}
 				err = c.addNewUser(&added, c.nodeInfo)
 				if err != nil {
-					c.logger.Print(err)
-				}
-				// Update Limiter
-				if err := c.UpdateInboundLimiter(c.Tag, &added); err != nil {
 					c.logger.Print(err)
 				}
 			}
@@ -348,6 +485,17 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo) (err error) {
 		return c.addInboundForSSPlugin(*newNodeInfo)
 	}
 	return nil
+}
+
+func (c *Controller) applyPortHopping(nodeInfo *api.NodeInfo) error {
+	if nodeInfo.Hysteria2 == nil || nodeInfo.Hysteria2.PortHopping == nil {
+		return nil
+	}
+	hop := nodeInfo.Hysteria2.PortHopping
+	if !hop.Enabled || !hop.AutoConfigureFirewall {
+		return nil
+	}
+	return c.portHopping.Apply(hop.Ports, nodeInfo.Port, c.Tag, c.config.ListenIP)
 }
 
 func (c *Controller) addInboundForSSPlugin(newNodeInfo api.NodeInfo) (err error) {
@@ -417,6 +565,8 @@ func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo
 		users = c.buildSSUser(userInfo, nodeInfo.CypherMethod)
 	case "Shadowsocks-Plugin":
 		users = c.buildSSPluginUser(userInfo)
+	case "Hysteria2", "Hysteria":
+		users = c.buildHysteria2User(userInfo)
 	default:
 		return fmt.Errorf("unsupported node type: %s", nodeInfo.NodeType)
 	}
@@ -483,6 +633,11 @@ func (c *Controller) userInfoMonitor() (err error) {
 	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.suspended || c.userList == nil {
+		return nil
+	}
 
 	// Get server status
 	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
@@ -522,13 +677,23 @@ func (c *Controller) userInfoMonitor() (err error) {
 
 	// Get User traffic
 	var userTraffic []api.UserTraffic
-	var upCounterList []stats.Counter
-	var downCounterList []stats.Counter
+	trafficNow := make(map[string]trafficSnapshot, len(*c.userList))
 	AutoSpeedLimit := int64(c.config.AutoSpeedLimitConfig.Limit)
 	UpdatePeriodic := int64(c.config.UpdatePeriodic)
 	limitedUsers := make([]api.UserInfo, 0)
 	for _, user := range *c.userList {
-		up, down, upCounter, downCounter := c.getTraffic(c.buildUserTag(&user))
+		userTag := c.buildUserTag(&user)
+		rawUp, rawDown, _, _ := c.getTraffic(userTag)
+		previous := c.trafficBase[userTag]
+		up := rawUp - previous.uplink
+		down := rawDown - previous.downlink
+		if up < 0 {
+			up = rawUp
+		}
+		if down < 0 {
+			down = rawDown
+		}
+		trafficNow[userTag] = trafficSnapshot{uplink: rawUp, downlink: rawDown}
 		if up > 0 || down > 0 {
 			// Over speed users
 			if AutoSpeedLimit > 0 {
@@ -554,12 +719,6 @@ func (c *Controller) userInfoMonitor() (err error) {
 				Upload:   up,
 				Download: down})
 
-			if upCounter != nil {
-				upCounterList = append(upCounterList, upCounter)
-			}
-			if downCounter != nil {
-				downCounterList = append(downCounterList, downCounter)
-			}
 		} else {
 			delete(c.warnedUsers, user)
 		}
@@ -574,12 +733,13 @@ func (c *Controller) userInfoMonitor() (err error) {
 		if !c.config.DisableUploadTraffic {
 			err = c.apiClient.ReportUserTraffic(&userTraffic)
 		}
-		// If report traffic error, not clear the traffic
 		if err != nil {
 			c.logger.Print(err)
 		} else {
-			c.resetTraffic(&upCounterList, &downCounterList)
+			c.trafficBase = trafficNow
 		}
+	} else if c.config.DisableUploadTraffic {
+		c.trafficBase = trafficNow
 	}
 
 	// Report Online info
@@ -604,6 +764,39 @@ func (c *Controller) userInfoMonitor() (err error) {
 		}
 
 	}
+	return nil
+}
+
+func (c *Controller) flushTrafficCounters() error {
+	if c.userList == nil {
+		return nil
+	}
+	now := make(map[string]trafficSnapshot, len(*c.userList))
+	traffic := make([]api.UserTraffic, 0, len(*c.userList))
+	for _, user := range *c.userList {
+		userTag := c.buildUserTag(&user)
+		rawUp, rawDown, _, _ := c.getTraffic(userTag)
+		previous := c.trafficBase[userTag]
+		up, down := rawUp-previous.uplink, rawDown-previous.downlink
+		if up < 0 {
+			up = rawUp
+		}
+		if down < 0 {
+			down = rawDown
+		}
+		now[userTag] = trafficSnapshot{uplink: rawUp, downlink: rawDown}
+		if up > 0 || down > 0 {
+			traffic = append(traffic, api.UserTraffic{UID: user.UID, Email: user.Email, Upload: up, Download: down})
+		}
+	}
+	if c.config.DisableUploadTraffic || len(traffic) == 0 {
+		c.trafficBase = now
+		return nil
+	}
+	if err := c.apiClient.ReportUserTraffic(&traffic); err != nil {
+		return err
+	}
+	c.trafficBase = now
 	return nil
 }
 
