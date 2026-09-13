@@ -2,6 +2,8 @@ package sspanel
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,8 @@ type APIClient struct {
 	LocalRuleList       []api.DetectRule
 	LastReportOnline    map[int]int
 	access              sync.Mutex
+	trafficPending      []UserTraffic
+	trafficReportID     string
 	version             string
 	eTags               map[string]string
 }
@@ -146,7 +150,10 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 		return nil, fmt.Errorf("request %s failed: %s", c.assembleURL(path), err)
 	}
 
-	if res.StatusCode() > 400 {
+	if res == nil {
+		return nil, fmt.Errorf("request %s failed without a response", c.assembleURL(path))
+	}
+	if res.StatusCode() >= 400 {
 		body := res.Body()
 		return nil, fmt.Errorf("request %s failed: %s, %v", c.assembleURL(path), string(body), err)
 	}
@@ -164,6 +171,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	path := fmt.Sprintf("/mod_mu/nodes/%d/info", c.NodeID)
 	res, err := c.client.R().
 		SetResult(&Response{}).
+		SetHeader("X-XrayR-Capabilities", "node-state-v1,hysteria2-v1,traffic-report-id-v1").
 		SetHeader("If-None-Match", c.eTags["node"]).
 		ForceContentType("application/json").
 		Get(path)
@@ -194,7 +202,10 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		isExpired = true
 	}
 
-	if c.DisableCustomConfig || isExpired {
+	if nodeInfoResponse.Sort == 15 && c.DisableCustomConfig {
+		return nil, fmt.Errorf("hysteria2 requires SSPanel custom_config; DisableCustomConfig must be false")
+	}
+	if (c.DisableCustomConfig || isExpired) && nodeInfoResponse.Sort != 15 {
 		if isExpired {
 			log.Print("The panel version is expired, it is recommended to update immediately")
 		}
@@ -223,6 +234,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		res, _ := json.Marshal(nodeInfoResponse)
 		return nil, fmt.Errorf("parse node info failed: %s, \nError: %s", string(res), err)
 	}
+	nodeInfo.Disabled = nodeInfoResponse.Enabled != nil && !*nodeInfoResponse.Enabled
 
 	return nodeInfo, nil
 }
@@ -319,28 +331,86 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 
 // ReportUserTraffic reports the user traffic
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	c.access.Lock()
+	defer c.access.Unlock()
 
-	data := make([]UserTraffic, len(*userTraffic))
+	current := make([]UserTraffic, len(*userTraffic))
 	for i, traffic := range *userTraffic {
-		data[i] = UserTraffic{
+		current[i] = UserTraffic{
 			UID:      traffic.UID,
 			Upload:   traffic.Upload,
 			Download: traffic.Download}
 	}
-	postData := &PostData{Data: data}
+
+	if len(c.trafficPending) > 0 {
+		if err := c.sendUserTraffic(c.trafficPending, c.trafficReportID); err != nil {
+			return err
+		}
+		current = subtractTraffic(current, c.trafficPending)
+		c.trafficPending = nil
+		c.trafficReportID = ""
+	}
+	if len(current) == 0 {
+		return nil
+	}
+	reportID, err := newReportID()
+	if err != nil {
+		return err
+	}
+	c.trafficPending = current
+	c.trafficReportID = reportID
+	if err := c.sendUserTraffic(current, reportID); err != nil {
+		return err
+	}
+	c.trafficPending = nil
+	c.trafficReportID = ""
+	return nil
+}
+
+func (c *APIClient) sendUserTraffic(data []UserTraffic, reportID string) error {
+	postData := &PostData{Data: data, ReportID: reportID}
 	path := "/mod_mu/users/traffic"
 	res, err := c.client.R().
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
+		SetHeader("X-XrayR-Capabilities", "traffic-report-id-v1").
 		SetBody(postData).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Post(path)
 	_, err = c.parseResponse(res, path, err)
-	if err != nil {
-		return err
-	}
+	return err
+}
 
-	return nil
+func newReportID() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate traffic report id: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func subtractTraffic(current, reported []UserTraffic) []UserTraffic {
+	old := make(map[int]UserTraffic, len(reported))
+	for _, item := range reported {
+		old[item.UID] = item
+	}
+	result := make([]UserTraffic, 0, len(current))
+	for _, item := range current {
+		if previous, ok := old[item.UID]; ok {
+			item.Upload -= previous.Upload
+			item.Download -= previous.Download
+		}
+		if item.Upload < 0 {
+			item.Upload = 0
+		}
+		if item.Download < 0 {
+			item.Download = 0
+		}
+		if item.Upload > 0 || item.Download > 0 {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 // GetNodeRule will pull the audit rule form ssPanel
@@ -745,6 +815,10 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 		alterID                uint16 = 0
 		transportProtocol      string
 	)
+	nodeType := c.NodeType
+	if nodeInfoResponse.Sort == 15 {
+		nodeType = "Hysteria2"
+	}
 
 	// Check if custom_config is null
 	if len(nodeInfoResponse.CustomConfig) == 0 {
@@ -770,7 +844,7 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 
 	port := uint32(parsedPort)
 
-	switch c.NodeType {
+	switch nodeType {
 	case "Shadowsocks":
 		transportProtocol = "tcp"
 	case "V2ray":
@@ -792,6 +866,20 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 		if nodeConfig.Network != "" {
 			transportProtocol = nodeConfig.Network // try to read transport protocol from config
 		}
+	case "Hysteria2", "Hysteria":
+		transportProtocol = "hysteria"
+		enableTLS = true
+		if nodeConfig.Hysteria2 == nil {
+			nodeConfig.Hysteria2 = &Hysteria2Config{Version: 2}
+		}
+		if nodeConfig.Hysteria2.Version == 0 {
+			nodeConfig.Hysteria2.Version = 2
+		}
+		if nodeConfig.Hysteria2.Version != 2 {
+			return nil, fmt.Errorf("unsupported hysteria version: %d", nodeConfig.Hysteria2.Version)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported node type: %s", nodeType)
 	}
 
 	// parse reality config
@@ -812,7 +900,8 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 
 	// Create GeneralNodeInfo
 	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
+		Disabled:          nodeInfoResponse.Enabled != nil && !*nodeInfoResponse.Enabled,
+		NodeType:          nodeType,
 		NodeID:            c.NodeID,
 		Port:              port,
 		SpeedLimit:        speedLimit,
@@ -829,44 +918,60 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 		EnableREALITY:     nodeConfig.EnableREALITY,
 		REALITYConfig:     realityConfig,
 	}
+	if nodeConfig.Hysteria2 != nil {
+		h := nodeConfig.Hysteria2
+		nodeInfo.Hysteria2 = &api.Hysteria2Config{
+			Version:        h.Version,
+			UDPIdleTimeout: h.UDPIdleTimeout,
+			Masquerade:     h.Masquerade,
+			FinalMask:      h.FinalMask,
+		}
+		if h.PortHopping != nil {
+			nodeInfo.Hysteria2.PortHopping = &api.PortHoppingConfig{
+				Enabled:               h.PortHopping.Enabled,
+				AutoConfigureFirewall: h.PortHopping.AutoConfigureFirewall,
+				Ports:                 h.PortHopping.Ports,
+			}
+		}
+	}
 
 	return nodeInfo, nil
 }
 
 // compareVersion, version1 > version2 return 1, version1 < version2 return -1, 0 means equal add support to latest sspanel version like 25.1.0
 func compareVersion(version1, version2 string) int {
-    // Split versions into components
-    v1Parts := strings.Split(version1, ".")
-    v2Parts := strings.Split(version2, ".")
+	// Split versions into components
+	v1Parts := strings.Split(version1, ".")
+	v2Parts := strings.Split(version2, ".")
 
-    // Compare each component
-    for i := 0; i < 3; i++ {
-        // Get component for version1 (default 0 if missing)
-        var num1 int
-        if i < len(v1Parts) {
-            num1, _ = strconv.Atoi(v1Parts[i])
-            // If it's the first component (year) and 4 digits, convert to 2 digits
-            if i == 0 && num1 >= 2000 {
-                num1 -= 2000
-            }
-        }
+	// Compare each component
+	for i := 0; i < 3; i++ {
+		// Get component for version1 (default 0 if missing)
+		var num1 int
+		if i < len(v1Parts) {
+			num1, _ = strconv.Atoi(v1Parts[i])
+			// If it's the first component (year) and 4 digits, convert to 2 digits
+			if i == 0 && num1 >= 2000 {
+				num1 -= 2000
+			}
+		}
 
-        // Get component for version2 (default 0 if missing)
-        var num2 int
-        if i < len(v2Parts) {
-            num2, _ = strconv.Atoi(v2Parts[i])
-            // If it's the first component (year) and 4 digits, convert to 2 digits
-            if i == 0 && num2 >= 2000 {
-                num2 -= 2000
-            }
-        }
+		// Get component for version2 (default 0 if missing)
+		var num2 int
+		if i < len(v2Parts) {
+			num2, _ = strconv.Atoi(v2Parts[i])
+			// If it's the first component (year) and 4 digits, convert to 2 digits
+			if i == 0 && num2 >= 2000 {
+				num2 -= 2000
+			}
+		}
 
-        // Compare
-        if num1 > num2 {
-            return 1
-        } else if num1 < num2 {
-            return -1
-        }
-    }
-    return 0
+		// Compare
+		if num1 > num2 {
+			return 1
+		} else if num1 < num2 {
+			return -1
+		}
+	}
+	return 0
 }

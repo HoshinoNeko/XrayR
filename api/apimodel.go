@@ -11,6 +11,7 @@ const (
 	UserNotModified = "users not modified"
 	NodeNotModified = "node not modified"
 	RuleNotModified = "rules not modified"
+	NodeDisabled    = "node disabled"
 )
 
 // Config API config
@@ -37,6 +38,7 @@ type NodeStatus struct {
 }
 
 type NodeInfo struct {
+	Disabled            bool
 	AcceptProxyProtocol bool
 	Authority           string
 	NodeType            string // Must be V2ray, Trojan, and Shadowsocks
@@ -78,6 +80,21 @@ type NodeInfo struct {
 	Security            string
 	Key                 string
 	RejectUnknownSni    bool
+	Hysteria2           *Hysteria2Config
+}
+
+type Hysteria2Config struct {
+	Version        int32
+	UDPIdleTimeout int64
+	Masquerade     conf.Masquerade
+	FinalMask      *conf.FinalMask
+	PortHopping    *PortHoppingConfig
+}
+
+type PortHoppingConfig struct {
+	Enabled               bool
+	AutoConfigureFirewall bool
+	Ports                 string
 }
 
 type UserInfo struct {

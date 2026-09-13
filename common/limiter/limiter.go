@@ -124,6 +124,32 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 	return nil
 }
 
+// RemoveInboundUsers revokes users before they are removed from the Xray
+// inbound. This also makes already authenticated multiplexed transports stop
+// on their next read or write.
+func (l *Limiter) RemoveInboundUsers(tag string, users []string) error {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return fmt.Errorf("no such inbound in limiter: %s", tag)
+	}
+	inboundInfo := value.(*InboundInfo)
+	for _, email := range users {
+		inboundInfo.UserInfo.Delete(email)
+		inboundInfo.BucketHub.Delete(email)
+		inboundInfo.UserOnlineIP.Delete(email)
+	}
+	return nil
+}
+
+func (l *Limiter) HasUser(tag, email string) bool {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return false
+	}
+	_, ok = value.(*InboundInfo).UserInfo.Load(email)
+	return ok
+}
+
 func (l *Limiter) DeleteInboundLimiter(tag string) error {
 	l.InboundInfo.Delete(tag)
 	return nil
@@ -176,6 +202,8 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 			uid = u.UID
 			userLimit = u.SpeedLimit
 			deviceLimit = u.DeviceLimit
+		} else {
+			return nil, false, true
 		}
 
 		// Local device limit
@@ -220,7 +248,7 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 		}
 	} else {
 		errors.LogDebug(context.Background(), "Get Inbound Limiter information failed")
-		return nil, false, false
+		return nil, false, true
 	}
 }
 

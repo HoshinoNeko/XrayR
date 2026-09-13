@@ -201,6 +201,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 				}
 			}
 		}
+		allowed := func() bool { return d.Limiter.HasUser(sessionInbound.Tag, user.Email) }
+		inboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: inboundLink.Writer}
+		outboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: outboundLink.Writer}
 	}
 
 	return inboundLink, outboundLink, nil
@@ -293,6 +296,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	if !destination.IsValid() {
 		return newError("Dispatcher: Invalid destination.")
 	}
+	if err := d.decorateDispatchLink(ctx, outbound); err != nil {
+		return err
+	}
 	outbounds := session.OutboundsFromContext(ctx)
 	if len(outbounds) == 0 {
 		outbounds = []*session.Outbound{{}}
@@ -333,6 +339,48 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		}()
 	}
 
+	return nil
+}
+
+// decorateDispatchLink applies the same per-user accounting and limiting used by
+// Dispatch to links supplied directly by inbounds such as Hysteria 2.
+func (d *DefaultDispatcher) decorateDispatchLink(ctx context.Context, link *transport.Link) error {
+	inbound := session.InboundFromContext(ctx)
+	if inbound == nil || inbound.User == nil || inbound.User.Email == "" {
+		return nil
+	}
+
+	ip := ""
+	if inbound.Source.IsValid() {
+		ip = inbound.Source.Address.String()
+	}
+	bucket, limited, reject := d.Limiter.GetUserBucket(inbound.Tag, inbound.User.Email, ip)
+	if reject {
+		common.Close(link.Writer)
+		common.Interrupt(link.Reader)
+		return newError("devices reach the limit: ", inbound.User.Email)
+	}
+	if limited {
+		link.Reader = d.Limiter.RateReader(link.Reader, bucket)
+		link.Writer = d.Limiter.RateWriter(link.Writer, bucket)
+	}
+
+	p := d.policy.ForLevel(inbound.User.Level)
+	if p.Stats.UserUplink {
+		name := "user>>>" + inbound.User.Email + ">>>traffic>>>uplink"
+		if counter, _ := stats.GetOrRegisterCounter(d.stats, name); counter != nil {
+			link.Reader = &SizeStatReader{Counter: counter, Reader: link.Reader}
+		}
+	}
+	if p.Stats.UserDownlink {
+		name := "user>>>" + inbound.User.Email + ">>>traffic>>>downlink"
+		if counter, _ := stats.GetOrRegisterCounter(d.stats, name); counter != nil {
+			link.Writer = &SizeStatWriter{Counter: counter, Writer: link.Writer}
+		}
+	}
+	allowed := func() bool { return d.Limiter.HasUser(inbound.Tag, inbound.User.Email) }
+	link.Reader = &AuthorizedReader{Allowed: allowed, Reader: link.Reader}
+	link.Writer = &AuthorizedWriter{Allowed: allowed, Writer: link.Writer}
 	return nil
 }
 
@@ -383,27 +431,12 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 }
 
 func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
-	outbounds := session.OutboundsFromContext(ctx)
-	ob := outbounds[len(outbounds)-1]
-	if hosts, ok := d.dns.(dns.HostsLookup); ok && destination.Address.Family().IsDomain() {
-		proxied := hosts.LookupHosts(ob.Target.String())
-		if proxied != nil {
-			ro := ob.RouteTarget == destination
-			destination.Address = *proxied
-			if ro {
-				ob.RouteTarget = destination
-			} else {
-				ob.Target = destination
-			}
-		}
-	}
-
 	var handler outbound.Handler
 
 	// Check if domain and protocol hit the rule
 	sessionInbound := session.InboundFromContext(ctx)
 	// Whether the inbound connection contains a user
-	if sessionInbound.User != nil {
+	if sessionInbound != nil && sessionInbound.User != nil {
 		if d.RuleManager.Detect(sessionInbound.Tag, destination.String(), sessionInbound.User.Email) {
 			errors.LogError(ctx, fmt.Sprintf("User %s access %s reject by rule", sessionInbound.User.Email, destination.String()))
 			newError("destination is reject by rule")
