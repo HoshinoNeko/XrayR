@@ -787,11 +787,10 @@ func (c *APIClient) ParseUserListResponse(userInfoResponse *[]UserResponse) (*[]
 			}
 		}
 
-		if c.SpeedLimit > 0 {
-			speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-		} else {
-			speedLimit = uint64((user.SpeedLimit * 1000000) / 8)
-		}
+		// Keep the panel's per-user limit independent from the optional local
+		// node-wide limit. The limiter applies the lower of both values, which
+		// preserves SSPanel's keep_connect=1 exhausted-user limit of 1 Mbps.
+		speedLimit = uint64((user.SpeedLimit * 1000000) / 8)
 		userList = append(userList, api.UserInfo{
 			UID:         user.ID,
 			UUID:        user.UUID,

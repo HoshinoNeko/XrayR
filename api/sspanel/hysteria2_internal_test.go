@@ -58,3 +58,18 @@ func TestSubtractTrafficAfterIdempotentRetry(t *testing.T) {
 		t.Fatalf("unexpected residual traffic: %#v", got)
 	}
 }
+
+func TestKeepConnectUserLimitWinsOverLocalNodeLimit(t *testing.T) {
+	client := New(&api.Config{NodeType: "V2ray", SpeedLimit: 100})
+	users, err := client.ParseUserListResponse(&[]UserResponse{{
+		ID:         1,
+		UUID:       "00000000-0000-4000-8000-000000000001",
+		SpeedLimit: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*users) != 1 || (*users)[0].SpeedLimit != 125000 {
+		t.Fatalf("expected exhausted user to retain 1 Mbps limit, got %#v", *users)
+	}
+}
