@@ -70,3 +70,79 @@ Subscriptions are generated for Mihomo/Clash, sing-box, Xray JSON, the generic
 V2Ray URI list, and the dedicated `/sub/{token}/hysteria2` endpoint. Protocol-
 specific SS, SIP002, SIP008, and Trojan formats cannot encode a Hysteria2 node
 and continue to return their own supported node types.
+
+## Polling, limits and accounting
+
+Node and user settings are fetched in full every `UpdatePeriodic` seconds.
+This is polling, not an immediate push: network failures delay application until
+a successful poll. Full fetches intentionally avoid consuming an ETag before
+configuration has been applied; they cost more bandwidth than conditional GETs.
+Only settings exposed by the panel API and consumed by XrayR affect the daemon.
+Subscription-only fields affect subscription output, not a running inbound.
+
+Invalid configurations are rejected before replacing the old node where possible.
+Activation failures trigger rollback; if rollback also fails, the node remains
+suspended and later polls retry activation. Rebuilding an inbound can disconnect
+existing sessions; this is not a seamless migration.
+
+The panel decides whether a user's quota is exhausted. With `keep_connect=false`,
+it omits the user; XrayR removes authorization and rejects further I/O. With
+`keep_connect=true`, it includes the user with a 1 Mbps (125000 bytes/s) cap.
+Dynamic wrappers resolve the current cap, and automatic limits cannot raise the
+panel cap. User removal/re-addition does not revive an old stream's authorization.
+Node-level quota exhaustion disables the whole node regardless of `keep_connect`.
+These actions follow reporting and polling intervals, not an exact local byte cutoff.
+
+Counter baselines survive in-process node reloads and disable/re-enable cycles.
+Previously authorized user counters remain tracked for late traffic. Traffic
+retries keep the report ID and subtract previously acknowledged batches, including
+when the residual batch fails again. This requires the matching SSPanel report-ID
+migration. Retry state and baselines are in memory: abrupt process loss is not
+covered by a durable accounting journal.
+
+## TLS and client boundaries
+
+Native HY2 inbound TLS advertises ALPN `h3`. Xray-core v26.3.27 no longer permits
+`allowInsecure` after its built-in cutoff date. For Xray JSON subscriptions use a
+trusted certificate, or set top-level `pinnedPeerCertSha256` in `custom_config` to
+the certificate SHA-256 hexadecimal fingerprint. An insecure request without a
+pin is rejected by the Xray subscription exporter rather than silently weakening
+TLS. Other clients keep their own native TLS options.
+
+Native Xray fields can be passed through to Xray JSON, but other clients cannot
+represent every Xray-specific mask or QUIC option. Protocol-specific formats
+listed above do not acquire HY2 support merely through subscription conversion.
+
+## Verification and remaining deployment checks
+
+Local regression commands (Go 1.26.1):
+
+```sh
+go test ./service/controller -run 'TestHysteriaLifecycleAndTCPForwarding|TestBuild' -count=1 -timeout=45s
+go test -race ./api/sspanel -run 'TestTrafficMultiple|TestNodeConfigPort|TestNodeAndUsers|TestKeepConnect|TestGetNodeInfoHysteria2Contract|TestSubtract|TestParseDisabled' -count=1
+go test -race ./common/limiter ./app/mydispatcher ./common/porthopping -count=1
+go test ./... -run '^$'
+go build ./...
+go vet ./...
+```
+
+Whole-project `go vet` currently reports pre-existing findings in
+`api/newV2board/model.go` (unexported JSON field) and `api/pmpanel/pmpanel_test.go`
+(unkeyed literals). Run `go vet ./api/sspanel ./app/mydispatcher ./common/limiter
+./common/porthopping ./service/controller` to check the affected packages separately.
+
+The lifecycle test uses real native-core TCP and UDP forwarding and checks billing,
+disable/recovery, invalid configuration rejection, occupied-port rollback and
+reload without historical rebilling. Old `TestController` requires an external
+panel and waits for a signal; it is not an unattended unit test.
+
+**Known pinned-core issue:** running the lifecycle test with `-race` detects an
+unsynchronized certificate slice read/write in Xray-core v26.3.27
+`transport/internet/tls/config.go` (`BuildCertificates`/`getNewGetCertificateFunc`).
+Certificate hot reload/OCSP has not been disabled to hide this failure. Fixing the
+dependency requires a separately reviewed core patch or version change.
+
+Linux NAT installation/removal still requires a disposable Linux test host with
+iptables privileges. Real database transactions, migrations and concurrent report
+deduplication require SSPanel's database test environment. Passing local contract
+tests does not substitute for these deployment checks or real-client testing.

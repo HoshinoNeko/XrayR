@@ -4,7 +4,30 @@ import (
 	"testing"
 
 	"github.com/HoshinoNeko/XrayR/api"
+	"github.com/xtls/xray-core/common/buf"
 )
+
+func TestReaddedUserDoesNotReviveOldAuthorization(t *testing.T) {
+	l := New()
+	users := []api.UserInfo{{UID: 1, UUID: "old"}}
+	if err := l.AddInboundLimiter("node", 0, &users, nil); err != nil {
+		t.Fatal(err)
+	}
+	allowed := l.Permission("node", "node||1")
+	if !allowed() || !l.MatchesUUID("node", "node||1", "old") {
+		t.Fatal("initial authorization missing")
+	}
+	if err := l.RemoveInboundUsers("node", []string{"node||1"}); err != nil {
+		t.Fatal(err)
+	}
+	users[0].UUID = "new"
+	if err := l.UpdateInboundLimiter("node", &users); err != nil {
+		t.Fatal(err)
+	}
+	if allowed() || l.MatchesUUID("node", "node||1", "old") || !l.Permission("node", "node||1")() {
+		t.Fatal("old authorization revived or new authorization rejected")
+	}
+}
 
 func TestRemovedUserIsRejected(t *testing.T) {
 	l := New()
@@ -21,5 +44,32 @@ func TestRemovedUserIsRejected(t *testing.T) {
 	}
 	if _, _, reject := l.GetUserBucket("Hysteria2_0.0.0.0_443", userTag, "192.0.2.1"); !reject {
 		t.Fatal("removed user was not rejected")
+	}
+}
+
+func TestExistingConnectionFollowsPanelLimitAndRevocation(t *testing.T) {
+	l := New()
+	users := []api.UserInfo{{UID: 1}}
+	if err := l.AddInboundLimiter("node", 12500000, &users, nil); err != nil {
+		t.Fatal(err)
+	}
+	writer := l.UserWriter(buf.Discard, "node", "node||1", "192.0.2.1")
+	if err := writer.WriteMultiBuffer(buf.MergeBytes(nil, []byte("before"))); err != nil {
+		t.Fatal(err)
+	}
+	users[0].SpeedLimit = 125000
+	if err := l.UpdateInboundLimiter("node", &users); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteMultiBuffer(buf.MergeBytes(nil, []byte("after"))); err != nil {
+		t.Fatal(err)
+	}
+	bucket, _, reject := l.GetUserBucket("node", "node||1", "192.0.2.1")
+	if reject || bucket.Limit() != 125000 {
+		t.Fatal("1 Mbps not applied")
+	}
+	l.RemoveInboundUsers("node", []string{"node||1"})
+	if err := writer.WriteMultiBuffer(buf.MergeBytes(nil, []byte("revoked"))); err == nil {
+		t.Fatal("revoked connection still writable")
 	}
 }

@@ -11,12 +11,14 @@ import (
 )
 
 type Writer struct {
+	resolve func() (*rate.Limiter, error)
 	writer  buf.Writer
 	limiter *rate.Limiter
 	w       io.Writer
 }
 
 type Reader struct {
+	resolve func() (*rate.Limiter, error)
 	reader  buf.Reader
 	limiter *rate.Limiter
 }
@@ -28,7 +30,7 @@ func (l *Limiter) RateReader(reader buf.Reader, limiter *rate.Limiter) buf.Reade
 func (r *Reader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	mb, err := r.reader.ReadMultiBuffer()
 	if !mb.IsEmpty() {
-		if waitErr := waitBytes(r.limiter, int(mb.Len())); waitErr != nil {
+		if waitErr := waitResolved(r.resolve, r.limiter, int(mb.Len())); waitErr != nil {
 			buf.ReleaseMulti(mb)
 			return nil, waitErr
 		}
@@ -56,11 +58,43 @@ func (w *Writer) Close() error {
 }
 
 func (w *Writer) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	if err := waitBytes(w.limiter, int(mb.Len())); err != nil {
+	if err := waitResolved(w.resolve, w.limiter, int(mb.Len())); err != nil {
 		buf.ReleaseMulti(mb)
 		return err
 	}
 	return w.writer.WriteMultiBuffer(mb)
+}
+
+func (l *Limiter) resolver(tag, email, ip string) func() (*rate.Limiter, error) {
+	return func() (*rate.Limiter, error) {
+		bucket, _, reject := l.GetUserBucket(tag, email, ip)
+		if reject {
+			return nil, io.ErrClosedPipe
+		}
+		return bucket, nil
+	}
+}
+
+func (l *Limiter) UserReader(reader buf.Reader, tag, email, ip string) buf.Reader {
+	return &Reader{reader: reader, resolve: l.resolver(tag, email, ip)}
+}
+
+func (l *Limiter) UserWriter(writer buf.Writer, tag, email, ip string) buf.Writer {
+	return &Writer{writer: writer, resolve: l.resolver(tag, email, ip)}
+}
+
+func waitResolved(resolve func() (*rate.Limiter, error), bucket *rate.Limiter, size int) error {
+	if resolve != nil {
+		var err error
+		bucket, err = resolve()
+		if err != nil {
+			return err
+		}
+	}
+	if bucket == nil {
+		return nil
+	}
+	return waitBytes(bucket, size)
 }
 
 func waitBytes(limiter *rate.Limiter, size int) error {

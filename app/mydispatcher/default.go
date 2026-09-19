@@ -23,6 +23,7 @@ import (
 	"github.com/xtls/xray-core/features/routing"
 	routingSession "github.com/xtls/xray-core/features/routing/session"
 	"github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/proxy/hysteria/account"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/pipe"
 
@@ -34,13 +35,25 @@ var errSniffingTimeout = newError("timeout on sniffing")
 
 type cachedReader struct {
 	sync.Mutex
-	reader *pipe.Reader
-	cache  buf.MultiBuffer
+	reader  buf.Reader
+	cache   buf.MultiBuffer
+	pending chan readResult
+	readErr error
+	done    chan struct{}
+	stopped bool
+}
+
+type readResult struct {
+	data buf.MultiBuffer
+	err  error
 }
 
 func (r *cachedReader) Cache(b *buf.Buffer) {
-	mb, _ := r.reader.ReadMultiBufferTimeout(time.Millisecond * 100)
+	mb, err := r.readTimeout(time.Millisecond * 100)
 	r.Lock()
+	if err != buf.ErrReadTimeout {
+		r.readErr = err
+	}
 	if !mb.IsEmpty() {
 		r.cache, _ = buf.MergeMulti(r.cache, mb)
 	}
@@ -70,6 +83,18 @@ func (r *cachedReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		return mb, nil
 	}
 
+	if r.readErr != nil {
+		return nil, r.readErr
+	}
+	if r.pending != nil {
+		select {
+		case result := <-r.pending:
+			r.pending = nil
+			return result.data, result.err
+		case <-r.done:
+			return nil, newError("reader interrupted")
+		}
+	}
 	return r.reader.ReadMultiBuffer()
 }
 
@@ -79,16 +104,63 @@ func (r *cachedReader) ReadMultiBufferTimeout(timeout time.Duration) (buf.MultiB
 		return mb, nil
 	}
 
-	return r.reader.ReadMultiBufferTimeout(timeout)
+	return r.readTimeout(timeout)
+}
+
+// Keep one read in flight across sniffing timeouts; never lose bytes or start
+// concurrent reads on QUIC streams.
+func (r *cachedReader) readTimeout(timeout time.Duration) (buf.MultiBuffer, error) {
+	if r.readErr != nil {
+		return nil, r.readErr
+	}
+	if r.pending == nil {
+		r.Lock()
+		if r.done == nil {
+			r.done = make(chan struct{})
+		}
+		done := r.done
+		stopped := r.stopped
+		r.Unlock()
+		if stopped {
+			return nil, newError("reader interrupted")
+		}
+		r.pending = make(chan readResult)
+		pending := r.pending
+		go func() {
+			data, err := r.reader.ReadMultiBuffer()
+			select {
+			case pending <- readResult{data, err}:
+			case <-done:
+				buf.ReleaseMulti(data)
+			}
+		}()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-r.pending:
+		r.pending = nil
+		return result.data, result.err
+	case <-timer.C:
+		return nil, buf.ErrReadTimeout
+	case <-r.done:
+		return nil, newError("reader interrupted")
+	}
 }
 
 func (r *cachedReader) Interrupt() {
 	r.Lock()
+	if !r.stopped {
+		r.stopped = true
+		if r.done != nil {
+			close(r.done)
+		}
+	}
 	if r.cache != nil {
 		r.cache = buf.ReleaseMulti(r.cache)
 	}
 	r.Unlock()
-	r.reader.Interrupt()
+	common.Interrupt(r.reader)
 }
 
 // DefaultDispatcher is a default implementation of Dispatcher.
@@ -168,7 +240,8 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 
 	if user != nil && len(user.Email) > 0 {
 		// Speed Limit and Device Limit
-		bucket, ok, reject := d.Limiter.GetUserBucket(sessionInbound.Tag, user.Email, sessionInbound.Source.Address.IP().String())
+		ip := sessionInbound.Source.Address.String()
+		_, _, reject := d.Limiter.GetUserBucket(sessionInbound.Tag, user.Email, ip)
 		if reject {
 			errors.LogWarning(ctx, "Devices reach the limit: ", user.Email)
 			common.Close(outboundLink.Writer)
@@ -177,10 +250,8 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, newError("Devices reach the limit: ", user.Email)
 		}
-		if ok {
-			inboundLink.Writer = d.Limiter.RateWriter(inboundLink.Writer, bucket)
-			outboundLink.Writer = d.Limiter.RateWriter(outboundLink.Writer, bucket)
-		}
+		inboundLink.Writer = d.Limiter.UserWriter(inboundLink.Writer, sessionInbound.Tag, user.Email, ip)
+		outboundLink.Writer = d.Limiter.UserWriter(outboundLink.Writer, sessionInbound.Tag, user.Email, ip)
 
 		p := d.policy.ForLevel(user.Level)
 		if p.Stats.UserUplink {
@@ -201,7 +272,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 				}
 			}
 		}
-		allowed := func() bool { return d.Limiter.HasUser(sessionInbound.Tag, user.Email) }
+		allowed := d.Limiter.Permission(sessionInbound.Tag, user.Email)
 		inboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: inboundLink.Writer}
 		outboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: outboundLink.Writer}
 	}
@@ -268,7 +339,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	} else {
 		go func() {
 			cReader := &cachedReader{
-				reader: outbound.Reader.(*pipe.Reader),
+				reader: outbound.Reader,
 			}
 			outbound.Reader = cReader
 			result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly, destination.Network)
@@ -314,11 +385,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	}
 	sniffingRequest := content.SniffingRequest
 	if !sniffingRequest.Enabled {
-		go d.routedDispatch(ctx, outbound, destination)
+		d.routedDispatch(ctx, outbound, destination)
 	} else {
-		go func() {
+		func() {
 			cReader := &cachedReader{
-				reader: outbound.Reader.(*pipe.Reader),
+				reader: outbound.Reader,
 			}
 			outbound.Reader = cReader
 			result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly, destination.Network)
@@ -349,21 +420,25 @@ func (d *DefaultDispatcher) decorateDispatchLink(ctx context.Context, link *tran
 	if inbound == nil || inbound.User == nil || inbound.User.Email == "" {
 		return nil
 	}
+	if auth, ok := inbound.User.Account.(*account.MemoryAccount); ok &&
+		!d.Limiter.MatchesUUID(inbound.Tag, inbound.User.Email, auth.Auth) {
+		common.Close(link.Writer)
+		common.Interrupt(link.Reader)
+		return newError("Hysteria2 authorization has changed")
+	}
 
 	ip := ""
 	if inbound.Source.IsValid() {
 		ip = inbound.Source.Address.String()
 	}
-	bucket, limited, reject := d.Limiter.GetUserBucket(inbound.Tag, inbound.User.Email, ip)
+	_, _, reject := d.Limiter.GetUserBucket(inbound.Tag, inbound.User.Email, ip)
 	if reject {
 		common.Close(link.Writer)
 		common.Interrupt(link.Reader)
 		return newError("devices reach the limit: ", inbound.User.Email)
 	}
-	if limited {
-		link.Reader = d.Limiter.RateReader(link.Reader, bucket)
-		link.Writer = d.Limiter.RateWriter(link.Writer, bucket)
-	}
+	link.Reader = d.Limiter.UserReader(link.Reader, inbound.Tag, inbound.User.Email, ip)
+	link.Writer = d.Limiter.UserWriter(link.Writer, inbound.Tag, inbound.User.Email, ip)
 
 	p := d.policy.ForLevel(inbound.User.Level)
 	if p.Stats.UserUplink {
@@ -378,7 +453,7 @@ func (d *DefaultDispatcher) decorateDispatchLink(ctx context.Context, link *tran
 			link.Writer = &SizeStatWriter{Counter: counter, Writer: link.Writer}
 		}
 	}
-	allowed := func() bool { return d.Limiter.HasUser(inbound.Tag, inbound.User.Email) }
+	allowed := d.Limiter.Permission(inbound.Tag, inbound.User.Email)
 	link.Reader = &AuthorizedReader{Allowed: allowed, Reader: link.Reader}
 	link.Writer = &AuthorizedWriter{Allowed: allowed, Writer: link.Writer}
 	return nil

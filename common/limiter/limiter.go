@@ -23,6 +23,8 @@ import (
 )
 
 type UserInfo struct {
+	UUID        string
+	generation  *uint64
 	UID         int
 	SpeedLimit  uint64
 	DeviceLimit int
@@ -86,7 +88,9 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 	userMap := new(sync.Map)
 	for _, u := range *userList {
 		userMap.Store(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID), UserInfo{
+			generation:  new(uint64),
 			UID:         u.UID,
+			UUID:        u.UUID,
 			SpeedLimit:  u.SpeedLimit,
 			DeviceLimit: u.DeviceLimit,
 		})
@@ -101,8 +105,15 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 		inboundInfo := value.(*InboundInfo)
 		// Update User info
 		for _, u := range *updatedUserList {
+			key := fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
+			generation := new(uint64)
+			if old, ok := inboundInfo.UserInfo.Load(key); ok {
+				generation = old.(UserInfo).generation
+			}
 			inboundInfo.UserInfo.Store(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID), UserInfo{
+				generation:  generation,
 				UID:         u.UID,
+				UUID:        u.UUID,
 				SpeedLimit:  u.SpeedLimit,
 				DeviceLimit: u.DeviceLimit,
 			})
@@ -148,6 +159,38 @@ func (l *Limiter) HasUser(tag, email string) bool {
 	}
 	_, ok = value.(*InboundInfo).UserInfo.Load(email)
 	return ok
+}
+
+func (l *Limiter) MatchesUUID(tag, email, uuid string) bool {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return false
+	}
+	user, ok := value.(*InboundInfo).UserInfo.Load(email)
+	return ok && user.(UserInfo).UUID == uuid
+}
+
+// Permission binds a connection to one authorization generation. Removing and
+// re-adding the same UID must not authorize a previously authenticated stream.
+func (l *Limiter) Permission(tag, email string) func() bool {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return func() bool { return false }
+	}
+	info := value.(*InboundInfo)
+	user, ok := info.UserInfo.Load(email)
+	if !ok {
+		return func() bool { return false }
+	}
+	generation := user.(UserInfo).generation
+	return func() bool {
+		current, ok := l.InboundInfo.Load(tag)
+		if !ok || current != info {
+			return false
+		}
+		user, ok := info.UserInfo.Load(email)
+		return ok && user.(UserInfo).generation == generation
+	}
 }
 
 func (l *Limiter) DeleteInboundLimiter(tag string) error {
