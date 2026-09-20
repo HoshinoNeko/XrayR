@@ -302,3 +302,6 @@ require (
 )
 
 replace github.com/exoscale/egoscale => github.com/exoscale/egoscale v0.102.3
+
+// Official v26.3.27 plus the immutable TLS certificate/OCSP snapshot patch.
+replace github.com/xtls/xray-core => github.com/HoshinoNeko/Xray-core v1.260327.1-0.20260920004509-40a2d0266fbb

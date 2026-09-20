@@ -1,6 +1,10 @@
 # SSPanel-UIM Hysteria2 (`sort = 15`)
 
-XrayR uses Xray-core's native `hysteria` protocol with `version: 2`. Each
+XrayR uses Xray-core's native `hysteria` protocol with `version: 2`. The dependency
+is official v26.3.27 plus a narrowly scoped TLS certificate snapshot patch from
+`HoshinoNeko/Xray-core`, pinned to commit
+`40a2d0266fbb1ed9c6ce34413e807438d150e0bf` through `go.mod`'s `replace` directive.
+This is a patched build, not an unmodified official release. Each
 SSPanel user UUID is used as that user's Hysteria2 authentication password.
 
 The XrayR node must use `PanelType: SSpanel`. `NodeType` may be left at its
@@ -136,11 +140,26 @@ disable/recovery, invalid configuration rejection, occupied-port rollback and
 reload without historical rebilling. Old `TestController` requires an external
 panel and waits for a signal; it is not an unattended unit test.
 
-**Known pinned-core issue:** running the lifecycle test with `-race` detects an
-unsynchronized certificate slice read/write in Xray-core v26.3.27
-`transport/internet/tls/config.go` (`BuildCertificates`/`getNewGetCertificateFunc`).
-Certificate hot reload/OCSP has not been disabled to hide this failure. Fixing the
-dependency requires a separately reviewed core patch or version change.
+**TLS race fixed in the pinned fork:** official v26.3.27 had an unsynchronized
+certificate slice read/write and in-place OCSP mutation. The fork publishes
+immutable certificate snapshots atomically, retains hot reload/OCSP/SNI behavior,
+and retries missing or invalid renewal files while retaining the old certificate.
+The native HY2 protocol and custom configuration schema are unchanged.
+
+Both the isolated certificate suite and the real HY2 lifecycle race test passed
+three consecutive runs with the local patch and again with the pinned remote
+dependency. Reproduce with:
+
+```sh
+go test -race github.com/xtls/xray-core/transport/internet/tls -run 'TestCertificate|TestExpiredCertificate|TestInsecureCertificates' -count=3 -timeout=90s
+go test -race ./service/controller -run '^TestHysteriaLifecycleAndTCPForwarding$' -count=3 -timeout=90s
+```
+
+The core TLS package also contains live ECH tests requiring external DNS/HTTPS;
+those failed or timed out in this environment and are not marked as passing.
+The separate dynamically issuing CA path is outside this ordinary server
+certificate hot-reload patch. Fork implementation details are in
+`TLS-SNAPSHOT-PATCH.md` at the pinned commit.
 
 Linux NAT installation/removal still requires a disposable Linux test host with
 iptables privileges. Real database transactions, migrations and concurrent report
