@@ -662,6 +662,8 @@ github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3
 github.com/HdrHistogram/hdrhistogram-go v1.1.2/go.mod h1:yDgFjdqOqDEKOvasDdhWNXYg9BVp4O+o5f6V/ehm6Oo=
 github.com/HoshinoNeko/Xray-core v1.260327.1-0.20260920004509-40a2d0266fbb h1:fuWo5S+hgWvnPcd4LujdbPVGcXx3QVO43O05S8Fmg/k=
 github.com/HoshinoNeko/Xray-core v1.260327.1-0.20260920004509-40a2d0266fbb/go.mod h1:OXMlhBloFry8mw0KwWLWLd3RQyXJzEYsCGlgsX36h60=
+github.com/HoshinoNeko/Xray-core v1.260327.1-0.20260922194944-a2192dfad2be h1:e+HddRZJTI07l6g+RLT5IVG4FbRzWTZcdQssDbKM6Gk=
+github.com/HoshinoNeko/Xray-core v1.260327.1-0.20260922194944-a2192dfad2be/go.mod h1:obbr2WDmr/cpQ/YLe1k0HTULnFXCO0rTWIeSrHoFk3o=
 github.com/JohnCGriffin/overflow v0.0.0-20211019200055-46fa312c352c/go.mod h1:X0CRv0ky0k6m906ixxpzmDRLvX58TFUKS2eePweuyxk=
 github.com/Joker/hpp v1.0.0 h1:65+iuJYdRXv/XyN62C1uEmmOx3432rNG/rKlX6V7Kkc=
 github.com/Joker/hpp v1.0.0/go.mod h1:8x5n+M1Hp5hC0g8okX3sR3vFQwynaX/UgSOM9MeBKzY=

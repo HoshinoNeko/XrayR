@@ -1,11 +1,16 @@
 # SSPanel-UIM Hysteria2 (`sort = 15`)
 
 XrayR uses Xray-core's native `hysteria` protocol with `version: 2`. The dependency
-is official v26.3.27 plus a narrowly scoped TLS certificate snapshot patch from
+is official v26.9.9 plus a narrowly scoped TLS certificate snapshot patch from
 `HoshinoNeko/Xray-core`, pinned to commit
-`40a2d0266fbb1ed9c6ce34413e807438d150e0bf` through `go.mod`'s `replace` directive.
+`a2192dfad2be562ff9b4fa4d4478aa454b6065e1` through `go.mod`'s remote `replace` directive.
 This is a patched build, not an unmodified official release. Each
 SSPanel user UUID is used as that user's Hysteria2 authentication password.
+
+The v26.9.9 upgrade is not fully production-validated: see
+[upgrade review](upgrade-v26.9.9-review.md) for the outstanding UDP and udphop
+regressions. The older lifecycle verification results below describe the previous
+v26.3.27 patch and do not establish that those new regressions are fixed.
 
 The XrayR node must use `PanelType: SSpanel`. `NodeType` may be left at its
 existing value because an SSPanel node with `sort: 15` is negotiated as
