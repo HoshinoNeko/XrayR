@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -52,6 +53,18 @@ func (a *lifecycleAPI) ReportUserTraffic(u *[]api.UserTraffic) error {
 }
 
 func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
+	for _, mode := range []string{"plain", "salamander", "salamander_udphop"} {
+		t.Run(mode, func(t *testing.T) { testHysteriaLifecycle(t, mode, 11, 4096, 16000) })
+	}
+}
+
+func TestHysteriaBasicConnectivity(t *testing.T) {
+	for _, mode := range []string{"plain", "salamander"} {
+		t.Run(mode, func(t *testing.T) { testHysteriaLifecycle(t, mode, 11) })
+	}
+}
+
+func testHysteriaLifecycle(t *testing.T, mode string, sizes ...int) {
 	dir := t.TempDir()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -77,6 +90,16 @@ func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
 	port := socket.LocalAddr().(*net.UDPAddr).Port
 	socket.Close()
 	a := &lifecycleAPI{node: api.NodeInfo{NodeType: "Hysteria2", NodeID: 1, Port: uint32(port), TransportProtocol: "hysteria", EnableTLS: true, Hysteria2: &api.Hysteria2Config{Version: 2}}, users: []api.UserInfo{{UID: 1, UUID: "123e4567-e89b-12d3-a456-426614174000"}}}
+	maskJSON := `null`
+	if mode != "plain" {
+		maskJSON = `{"udp":[{"type":"salamander","settings":{"password":"change-this-obfs-password"}}]}`
+		if mode == "salamander_udphop" {
+			maskJSON = fmt.Sprintf(`{"udp":[{"type":"salamander","settings":{"password":"change-this-obfs-password"}},{"type":"udphop","settings":{"mode":"intervalremote","interval":30,"remotePorts":"%d"}}]}`, port)
+		}
+		if err := json.Unmarshal([]byte(maskJSON), &a.node.Hysteria2.FinalMask); err != nil {
+			t.Fatal(err)
+		}
+	}
 	base := &conf.Config{LogConfig: &conf.LogConfig{LogLevel: "debug"}, Stats: &conf.StatsConfig{}, Policy: &conf.PolicyConfig{Levels: map[uint32]*conf.Policy{0: {StatsUserUplink: true, StatsUserDownlink: true}}}}
 	built, err := base.Build()
 	if err != nil {
@@ -106,6 +129,19 @@ func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
 	}
 	c.startAt = time.Now().Add(-2 * time.Hour)
 	defer c.Close()
+	// v26.9.9 blocks private destinations by default. Permit only this test's
+	// loopback echo targets; keep the production outbound security policy intact.
+	loopbackSettings := json.RawMessage(`{"finalRules":[{"action":"allow","ip":["127.0.0.1/32"]}]}`)
+	loopbackOutbound, err := (&conf.OutboundDetourConfig{Tag: c.Tag, Protocol: "freedom", Settings: &loopbackSettings}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.removeOutbound(c.Tag); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addOutbound(loopbackOutbound); err != nil {
+		t.Fatal(err)
+	}
 
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -120,7 +156,7 @@ func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
 		}
 	}()
 	var clientConfig conf.Config
-	raw := fmt.Sprintf(`{"outbounds":[{"protocol":"hysteria","settings":{"version":2,"address":"127.0.0.1","port":%d},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"%x","serverName":"localhost"},"hysteriaSettings":{"version":2,"auth":"%s"}}}]}`, port, sha256.Sum256(der), a.users[0].UUID)
+	raw := fmt.Sprintf(`{"outbounds":[{"protocol":"hysteria","settings":{"version":2,"address":"127.0.0.1","port":%d},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"%x","serverName":"localhost"},"finalmask":%s,"hysteriaSettings":{"version":2,"auth":"%s"}}}]}`, port, sha256.Sum256(der), maskJSON, a.users[0].UUID)
 	if err = json.Unmarshal([]byte(raw), &clientConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -160,10 +196,15 @@ func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer udpEcho.Close()
+	receivedDatagrams := make(chan int, 16)
 	go func() {
-		data := make([]byte, 2048)
-		n, addr, e := udpEcho.ReadFrom(data)
-		if e == nil {
+		data := make([]byte, 65535)
+		for {
+			n, addr, e := udpEcho.ReadFrom(data)
+			if e != nil {
+				return
+			}
+			receivedDatagrams <- n
 			udpEcho.WriteTo(data[:n], addr)
 		}
 	}()
@@ -172,16 +213,23 @@ func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	udpConn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err = udpConn.Write([]byte("hy2-udp-echo")); err != nil {
-		t.Fatal(err)
+	for _, size := range sizes {
+		udpConn.SetDeadline(time.Now().Add(5 * time.Second))
+		payload := bytes.Repeat([]byte{byte(size % 251)}, size)
+		if _, err = udpConn.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		udpData := make([]byte, 65535)
+		n, err := udpConn.Read(udpData)
+		if err != nil || !bytes.Equal(udpData[:n], payload) {
+			var echoSizes []int
+			for len(receivedDatagrams) > 0 {
+				echoSizes = append(echoSizes, <-receivedDatagrams)
+			}
+			t.Fatalf("UDP echo size %d: received %d bytes, error %v; echo server datagram sizes %v", size, n, err, echoSizes)
+		}
 	}
-	udpData := make([]byte, 2048)
-	n, err := udpConn.Read(udpData)
 	udpConn.Close()
-	if err != nil || string(udpData[:n]) != "hy2-udp-echo" {
-		t.Fatalf("UDP echo: %q %v", udpData[:n], err)
-	}
 	if err = c.flushTrafficCounters(); err != nil {
 		t.Fatal(err)
 	}

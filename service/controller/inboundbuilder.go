@@ -41,7 +41,7 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 	// SniffingConfig
 	sniffingConfig := &conf.SniffingConfig{
 		Enabled:      true,
-		DestOverride: &conf.StringList{"http", "tls", "quic", "fakedns"},
+		DestOverride: conf.StringList{"http", "tls", "quic", "fakedns"},
 	}
 	if config.DisableSniffing {
 		sniffingConfig.Enabled = false
@@ -218,7 +218,18 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 			UdpIdleTimeout: nodeInfo.Hysteria2.UDPIdleTimeout,
 			Masquerade:     nodeInfo.Hysteria2.Masquerade,
 		}
-		streamSetting.FinalMask = nodeInfo.Hysteria2.FinalMask
+		if mask := nodeInfo.Hysteria2.FinalMask; mask != nil {
+			serverMask := *mask
+			serverMask.Udp = nil
+			for _, item := range mask.Udp {
+				// v26.9.9 udphop is client-only; server forwarding is managed
+				// separately by portHopping/iptables. Never mutate panel state.
+				if item.Type != "udphop" {
+					serverMask.Udp = append(serverMask.Udp, item)
+				}
+			}
+			streamSetting.FinalMask = &serverMask
+		}
 	}
 	streamSetting.Network = &transportProtocol
 
