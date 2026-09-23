@@ -68,6 +68,4 @@ import (
 	// Load config from file or http(s)
 	_ "github.com/xtls/xray-core/main/confloader/external"
 
-	// Commands
-	_ "github.com/xtls/xray-core/main/commands/all"
 )

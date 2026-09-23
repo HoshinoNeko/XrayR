@@ -120,7 +120,12 @@ jobs:
       - name: Build XrayR
         run: |
           mkdir -p build_assets
-          go build -v -o build_assets/XrayR -trimpath -ldflags "-s -w -buildid="
+          ldflags="-s -w -buildid="
+          # anet uses net internals on Android; match the pinned core's build flags.
+          if [ "$GOOS" = "android" ]; then
+            ldflags="$ldflags -checklinkname=0"
+          fi
+          go build -mod=readonly -v -o build_assets/XrayR -trimpath -ldflags "$ldflags"
 
       - name: Build Mips softfloat XrayR
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
