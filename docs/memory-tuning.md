@@ -10,6 +10,46 @@
   重新启用成功后也调用一次，且在释放控制器锁后执行。普通轮询、
   未修改节点及仅更新用户时不强制释放。
 
+## ConnectionConfig.BufferSize
+
+这是 XrayR 本地 `config.yml` 的**顶层 ConnectionConfig** 配置，不放在
+`Nodes[].ControllerConfig` 中，也不是面板 `custom_config` 的参数。
+项目默认值和随包示例均为 `64`；内核将数值乘以 1024，所以实际单位是 KiB。
+例如可用下面的配置进行较小缓冲的对比测试（不是已验证适合所有负载的推荐值）：
+
+```yaml
+ConnectionConfig:
+  Handshake: 4
+  ConnIdle: 30
+  UplinkOnly: 2
+  DownlinkOnly: 4
+  BufferSize: 16 # KiB；项目默认 64，可对比 16/32/64 的吞吐与内存
+```
+
+在原有 ConnectionConfig 中修改 BufferSize 即可，不要重复创建 YAML 键。
+修改本地配置会走现有配置热重载流程、重建服务，可能中断已有连接；
+也可以在维护窗口重启。本文仅补充说明，没有修改默认值或运行配置。
+
+生效范围与注意事项：
+
+- XrayR 将其传入 Xray-core 的 level 0 policy.bufferSize。采用该策略并通过
+  上下文传递缓冲策略的 pipe 路径才受影响；不是单个用户、整条连接或整个进程
+  的严格内存上限。普通 dispatcher pipe 路径有上下行两条队列，不能简单用
+  “连接数 × BufferSize”计算 RSS，也不是启动时为每条连接固定预分配这些内存。
+- 缩小缓冲可能减少积压数据占用，但也可能增加背压、影响高吞吐或高延迟链路；
+  应在相同并发/流量负载下比较 RSS、吞吐、延迟和 GC CPU，而非仅看空载内存。
+- 当前固定版本的 Hysteria2 入站使用 DispatchLink 直接交付 Reader/Writer，
+  不经过 XrayR getLink 创建上下行 pipe。因此不能声称调小此值就能限制
+  Hysteria2 的 QUIC/UDP 缓冲；它也不控制 QUIC 连接/流接收窗口、socket 缓冲、
+  geodata 或 lego 初始化内存。协议自身缓冲参数需另行核对。
+- 内核中负值表示不设该缓冲大小限制，不适合用来降低内存；`0` 也不等于
+  “零分配/完全不占内存”，仍有传输中的数据块与协议开销。
+
+核对来源：`panel/defaultConfig.go`、`panel/panel.go:parseConnectionConfig`、
+`release/config/config.yml.example`、`app/mydispatcher/default.go:getLink`，以及
+当前 go.mod 固定的 core 中 `infra/conf/policy.go`、`transport/pipe` 和
+`proxy/hysteria/server.go`。这与下方 GOMEMLIMIT 的运行时软目标是不同层级的控制。
+
 ## GOMEMLIMIT
 
 镜像默认 ENV GOMEMLIMIT=40MiB，可通过 docker run -e GOMEMLIMIT=256MiB 覆盖。
