@@ -239,19 +239,22 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	}
 
 	if user != nil && len(user.Email) > 0 {
-		// Speed Limit and Device Limit
-		ip := sessionInbound.Source.Address.String()
-		_, _, reject := d.Limiter.GetUserBucket(sessionInbound.Tag, user.Email, ip)
-		if reject {
-			errors.LogWarning(ctx, "Devices reach the limit: ", user.Email)
-			common.Close(outboundLink.Writer)
-			common.Close(inboundLink.Writer)
-			common.Interrupt(outboundLink.Reader)
-			common.Interrupt(inboundLink.Reader)
-			return nil, nil, newError("Devices reach the limit: ", user.Email)
+		managed := !d.Limiter.IsStaticInbound(sessionInbound.Tag)
+		if managed {
+			// Speed Limit and Device Limit
+			ip := sessionInbound.Source.Address.String()
+			_, _, reject := d.Limiter.GetUserBucket(sessionInbound.Tag, user.Email, ip)
+			if reject {
+				errors.LogWarning(ctx, "Devices reach the limit: ", user.Email)
+				common.Close(outboundLink.Writer)
+				common.Close(inboundLink.Writer)
+				common.Interrupt(outboundLink.Reader)
+				common.Interrupt(inboundLink.Reader)
+				return nil, nil, newError("Devices reach the limit: ", user.Email)
+			}
+			inboundLink.Writer = d.Limiter.UserWriter(inboundLink.Writer, sessionInbound.Tag, user.Email, ip)
+			outboundLink.Writer = d.Limiter.UserWriter(outboundLink.Writer, sessionInbound.Tag, user.Email, ip)
 		}
-		inboundLink.Writer = d.Limiter.UserWriter(inboundLink.Writer, sessionInbound.Tag, user.Email, ip)
-		outboundLink.Writer = d.Limiter.UserWriter(outboundLink.Writer, sessionInbound.Tag, user.Email, ip)
 
 		p := d.policy.ForLevel(user.Level)
 		if p.Stats.UserUplink {
@@ -272,9 +275,11 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 				}
 			}
 		}
-		allowed := d.Limiter.Permission(sessionInbound.Tag, user.Email)
-		inboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: inboundLink.Writer}
-		outboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: outboundLink.Writer}
+		if managed {
+			allowed := d.Limiter.Permission(sessionInbound.Tag, user.Email)
+			inboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: inboundLink.Writer}
+			outboundLink.Writer = &AuthorizedWriter{Allowed: allowed, Writer: outboundLink.Writer}
+		}
 	}
 
 	return inboundLink, outboundLink, nil
@@ -418,25 +423,28 @@ func (d *DefaultDispatcher) decorateDispatchLink(ctx context.Context, link *tran
 	if inbound == nil || inbound.User == nil || inbound.User.Email == "" {
 		return nil
 	}
-	if auth, ok := inbound.User.Account.(*account.MemoryAccount); ok &&
-		!d.Limiter.MatchesUUID(inbound.Tag, inbound.User.Email, auth.Auth) {
-		common.Close(link.Writer)
-		common.Interrupt(link.Reader)
-		return newError("Hysteria2 authorization has changed")
-	}
+	managed := !d.Limiter.IsStaticInbound(inbound.Tag)
+	if managed {
+		if auth, ok := inbound.User.Account.(*account.MemoryAccount); ok &&
+			!d.Limiter.MatchesUUID(inbound.Tag, inbound.User.Email, auth.Auth) {
+			common.Close(link.Writer)
+			common.Interrupt(link.Reader)
+			return newError("Hysteria2 authorization has changed")
+		}
 
-	ip := ""
-	if inbound.Source.IsValid() {
-		ip = inbound.Source.Address.String()
+		ip := ""
+		if inbound.Source.IsValid() {
+			ip = inbound.Source.Address.String()
+		}
+		_, _, reject := d.Limiter.GetUserBucket(inbound.Tag, inbound.User.Email, ip)
+		if reject {
+			common.Close(link.Writer)
+			common.Interrupt(link.Reader)
+			return newError("devices reach the limit: ", inbound.User.Email)
+		}
+		link.Reader = d.Limiter.UserReader(link.Reader, inbound.Tag, inbound.User.Email, ip)
+		link.Writer = d.Limiter.UserWriter(link.Writer, inbound.Tag, inbound.User.Email, ip)
 	}
-	_, _, reject := d.Limiter.GetUserBucket(inbound.Tag, inbound.User.Email, ip)
-	if reject {
-		common.Close(link.Writer)
-		common.Interrupt(link.Reader)
-		return newError("devices reach the limit: ", inbound.User.Email)
-	}
-	link.Reader = d.Limiter.UserReader(link.Reader, inbound.Tag, inbound.User.Email, ip)
-	link.Writer = d.Limiter.UserWriter(link.Writer, inbound.Tag, inbound.User.Email, ip)
 
 	p := d.policy.ForLevel(inbound.User.Level)
 	if p.Stats.UserUplink {
@@ -451,9 +459,11 @@ func (d *DefaultDispatcher) decorateDispatchLink(ctx context.Context, link *tran
 			link.Writer = &SizeStatWriter{Counter: counter, Writer: link.Writer}
 		}
 	}
-	allowed := d.Limiter.Permission(inbound.Tag, inbound.User.Email)
-	link.Reader = &AuthorizedReader{Allowed: allowed, Reader: link.Reader}
-	link.Writer = &AuthorizedWriter{Allowed: allowed, Writer: link.Writer}
+	if managed {
+		allowed := d.Limiter.Permission(inbound.Tag, inbound.User.Email)
+		link.Reader = &AuthorizedReader{Allowed: allowed, Reader: link.Reader}
+		link.Writer = &AuthorizedWriter{Allowed: allowed, Writer: link.Writer}
+	}
 	return nil
 }
 

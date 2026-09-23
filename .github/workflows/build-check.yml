@@ -65,7 +65,7 @@ jobs:
         run: |
           tags=""
           if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
-          go test -mod=readonly -tags "$tags" ./common/mylego ./common/limiter ./service/controller -run '^(TestMinimal.*|TestCertMonitor.*|TestLazy.*|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s
+          go test -mod=readonly -tags "$tags" ./common/mylego ./common/limiter ./service/controller ./app/mydispatcher ./panel -run '^(TestMinimal.*|TestCertMonitor.*|TestLazy.*|TestStaticInbound.*|TestBufferedReader.*|TestCustomInboundConnectivity|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s
       - name: Build image and smoke test (no publishing)
         if: matrix.target.os == 'linux'
         env:

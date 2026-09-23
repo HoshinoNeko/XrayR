@@ -43,7 +43,22 @@ type InboundInfo struct {
 }
 
 type Limiter struct {
-	InboundInfo *sync.Map // Key: Tag, Value: *InboundInfo
+	InboundInfo    *sync.Map // Key: Tag, Value: *InboundInfo
+	staticInbounds sync.Map  // Explicit local configuration; never inferred from missing users.
+}
+
+// RegisterStaticInbound is called before the core starts accepting connections.
+func (l *Limiter) RegisterStaticInbound(tag string) error {
+	if _, exists := l.InboundInfo.Load(tag); exists {
+		return fmt.Errorf("inbound %q is already panel-managed", tag)
+	}
+	l.staticInbounds.Store(tag, struct{}{})
+	return nil
+}
+
+func (l *Limiter) IsStaticInbound(tag string) bool {
+	_, ok := l.staticInbounds.Load(tag)
+	return ok
 }
 
 func New() *Limiter {
@@ -53,6 +68,9 @@ func New() *Limiter {
 }
 
 func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalLimit *GlobalDeviceLimitConfig) error {
+	if l.IsStaticInbound(tag) {
+		return fmt.Errorf("panel inbound %q conflicts with a local custom inbound", tag)
+	}
 	inboundInfo := &InboundInfo{
 		Tag:            tag,
 		NodeSpeedLimit: nodeSpeedLimit,

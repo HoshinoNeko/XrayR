@@ -35,6 +35,32 @@ func TestLazyBucketConcurrentReuse(t *testing.T) {
 	}
 }
 
+func TestStaticInboundIsExplicitAndCannotBecomePanelManaged(t *testing.T) {
+	l := New()
+	users := []api.UserInfo{{UID: 1, UUID: "test-uuid"}}
+	if l.IsStaticInbound("unknown") {
+		t.Fatal("unknown tag treated as static")
+	}
+	if err := l.RegisterStaticInbound("custom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.AddInboundLimiter("custom", 0, &users, nil); err == nil {
+		t.Fatal("static/panel tag collision accepted")
+	}
+	if err := l.AddInboundLimiter("panel", 0, &users, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RegisterStaticInbound("panel"); err == nil {
+		t.Fatal("active panel tag registered as static")
+	}
+	if err := l.DeleteInboundLimiter("panel"); err != nil {
+		t.Fatal(err)
+	}
+	if l.IsStaticInbound("panel") || l.MatchesUUID("panel", "panel||1", "test-uuid") {
+		t.Fatal("removed panel inbound became authorized")
+	}
+}
+
 func BenchmarkGetUserBucketCached(b *testing.B) {
 	l := New()
 	users := []api.UserInfo{{UID: 1}}

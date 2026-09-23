@@ -524,11 +524,17 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 }
 
 func (c *Controller) removeOldTag(oldTag string) (err error) {
+	if c.dispatcher.Limiter.IsStaticInbound(oldTag) {
+		return fmt.Errorf("refusing to remove local custom inbound %q as a panel node", oldTag)
+	}
 	// Always attempt both, including cleanup after a partially failed activation.
 	return errors.Join(c.removeInbound(oldTag), c.removeOutbound(oldTag))
 }
 
 func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo) (err error) {
+	if c.dispatcher.Limiter.IsStaticInbound(c.Tag) {
+		return fmt.Errorf("panel inbound %q conflicts with a local custom inbound", c.Tag)
+	}
 	if newNodeInfo.NodeType != "Shadowsocks-Plugin" {
 		inboundConfig, err := InboundBuilder(c.config, newNodeInfo, c.Tag)
 		if err != nil {

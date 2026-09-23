@@ -12,6 +12,7 @@ import (
 	"github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/infra/conf"
 
 	"github.com/HoshinoNeko/XrayR/api"
@@ -153,6 +154,13 @@ func (p *Panel) loadCore(panelConfig *Config) *core.Instance {
 	server, err := core.New(config)
 	if err != nil {
 		log.Panicf("failed to create instance: %s", err)
+	}
+	// Static users are authenticated by their inbound protocol, not by panel data.
+	dispatcher := server.GetFeature(routing.DispatcherType()).(*mydispatcher.DefaultDispatcher)
+	for _, inbound := range inBoundConfig {
+		if err := dispatcher.Limiter.RegisterStaticInbound(inbound.Tag); err != nil {
+			log.Panicf("failed to register custom inbound: %s", err)
+		}
 	}
 
 	return server
