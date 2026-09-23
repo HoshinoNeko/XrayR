@@ -20,6 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        edition: [full, minimal]
         target:
           - { os: linux, arch: amd64 }
           - { os: windows, arch: amd64 }
@@ -36,10 +37,29 @@ jobs:
           CGO_ENABLED: '0'
           GOOS: ${{ matrix.target.os }}
           GOARCH: ${{ matrix.target.arch }}
+          EDITION: ${{ matrix.edition }}
         run: |
           ldflags="-s -w -buildid="
           if [ "$GOOS" = "android" ]; then
             ldflags="$ldflags -checklinkname=0"
           fi
-          go build -mod=readonly -trimpath -ldflags "$ldflags" -o "$RUNNER_TEMP/XrayR"
+          tags=""
+          if [ "$EDITION" = "minimal" ]; then tags=minimal; fi
+          go build -mod=readonly -tags "$tags" -trimpath -ldflags "$ldflags" -o "$RUNNER_TEMP/XrayR"
+          if [ "$EDITION" = "minimal" ]; then
+            go list -mod=readonly -tags minimal -deps . > "$RUNNER_TEMP/deps.txt"
+            if grep -q '^github.com/go-acme/lego/' "$RUNNER_TEMP/deps.txt"; then
+              echo "minimal must not link lego"
+              exit 1
+            fi
+          fi
           git diff --exit-code -- go.mod go.sum
+      - name: Certificate and Hysteria2 basic regression
+        if: matrix.target.os == 'linux'
+        env:
+          CGO_ENABLED: '0'
+          EDITION: ${{ matrix.edition }}
+        run: |
+          tags=""
+          if [ "$EDITION" = "minimal" ]; then tags=minimal; fi
+          go test -mod=readonly -tags "$tags" ./common/mylego ./service/controller -run '^(TestMinimal.*|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s

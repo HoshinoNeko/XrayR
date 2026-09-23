@@ -1,3 +1,5 @@
+//go:build !minimal
+
 package mylego_test
 
 import (

@@ -164,33 +164,63 @@ jobs:
               HASH="$(curl -sL "${DOWNLOAD_URL}.sha256sum" | awk -F ' ' '{print $1}')"
               [ "$(sha256sum "./build_assets/${FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ] || { echo -e "The HASH key of ${FILE_NAME} does not match cloud one."; exit 1; }
             done
-      - name: Create ZIP archive
+      - name: Build minimal edition
         shell: bash
         run: |
-          pushd build_assets || exit 1
-          touch -mt $(date +%Y01010000) *
-          zip -9vr ../XrayR-$ASSET_NAME.zip .
-          popd || exit 1
-          FILE=./XrayR-$ASSET_NAME.zip
-          DGST=$FILE.dgst
-          for METHOD in {"md5","sha1","sha256","sha512"}
-          do
-            openssl dgst -$METHOD $FILE | sed 's/([^)]*)//g' >>$DGST
+          cp -R build_assets build_assets-minimal
+          cp docs/minimal.md build_assets-minimal/MINIMAL.md
+          # Keep the existing example paths, but do not suggest an unavailable ACME mode.
+          sed -i 's/CertMode: dns/CertMode: file/g' build_assets-minimal/config.yml
+          ldflags="-s -w -buildid="
+          binary=XrayR
+          if [ "$GOOS" = "windows" ]; then binary=XrayR.exe; fi
+          if [ "$GOOS" = "android" ]; then ldflags="$ldflags -checklinkname=0"; fi
+          go build -mod=readonly -tags minimal -trimpath -ldflags "$ldflags" -o "build_assets-minimal/$binary"
+          if [ "$GOARCH" = "mips" ] || [ "$GOARCH" = "mipsle" ]; then
+            GOMIPS=softfloat go build -mod=readonly -tags minimal -trimpath -ldflags "$ldflags" -o build_assets-minimal/XrayR_softfloat
+          fi
+      - name: Create ZIP archives
+        shell: bash
+        run: |
+          for suffix in "" "-minimal"; do
+            pushd "build_assets$suffix" || exit 1
+            touch -mt $(date +%Y01010000) *
+            zip -9vr "../XrayR-$ASSET_NAME$suffix.zip" .
+            popd || exit 1
+            FILE="./XrayR-$ASSET_NAME$suffix.zip"
+            DGST=$FILE.dgst
+            for METHOD in {"md5","sha1","sha256","sha512"}; do
+              openssl dgst -$METHOD "$FILE" | sed 's/([^)]*)//g' >>"$DGST"
+            done
           done
       - name: Change the name
         run: |
           mv build_assets XrayR-$ASSET_NAME
+          mv build_assets-minimal XrayR-$ASSET_NAME-minimal
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: |
             ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}/*
+      - name: Upload minimal files to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-minimal
+          path: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-minimal/*
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
+          tag: ${{ github.ref }}
+          file_glob: true
+      - name: Upload minimal binaries to release
+        uses: svenstaro/upload-release-action@v2
+        if: github.event_name == 'release'
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-minimal.zip*
           tag: ${{ github.ref }}
           file_glob: true

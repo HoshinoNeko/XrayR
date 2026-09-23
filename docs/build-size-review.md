@@ -1,5 +1,10 @@
 # Cross-platform builds and binary size
 
+Follow-up: the user selected an edition without **any** automatic certificate
+issuance/renewal, rather than the two-provider proposal below. This is now
+implemented with the `minimal` build tag; see [minimal.md](minimal.md).
+The historical two-provider measurements below remain experimental only.
+
 ## Implemented fixes
 
 - Run `go mod tidy` to record the Windows-only dependency
