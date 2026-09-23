@@ -52,7 +52,8 @@ UPX 压缩的是可执行文件在磁盘上的表示，不保证减少运行内�
 解包完整性检查不等同于目标系统运行测试。不同操作系统、架构和安全策略
 需要单独验证；不能把 Linux amd64 的结果推广到 Android、macOS 或所有平台。
 正常 Release 文件不自动应用 UPX，避免改变完整/minimal 两版的运行兼容性。
-发布 Release 时额外生成 Actions-only 的 UPX 副本（完整/minimal 两版），
+发布 Release 或手动触发 Build and Release 工作流（workflow_dispatch，可选择分支）时，
+额外生成 Actions-only 的 UPX 副本（完整/minimal 两版），
 放在名为 `XrayR-<平台>-upx` 的 Actions Artifact 内，不上传到 GitHub Release。
 其中 tar.gz 保留可执行权限，附 SHA-256 校验文件及 UPX.txt 日志。
 使用 `--best --lzma` 并运行 `upx -t`；不支持的格式或校验失败会明确记录并跳过，
