@@ -224,3 +224,23 @@ jobs:
           file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-minimal.zip*
           tag: ${{ github.ref }}
           file_glob: true
+      # Optional compressed copies: never overwrite or upload these to Releases.
+      - name: Install UPX for Actions-only copies
+        if: github.event_name == 'release'
+        id: install_upx
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+          upx --version
+      - name: Pack UPX copies
+        if: github.event_name == 'release' && steps.install_upx.outcome == 'success'
+        run: bash .github/build/upx-artifacts.sh
+      - name: Upload UPX copies to Actions only
+        if: github.event_name == 'release' && steps.install_upx.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-upx
+          path: ./upx_artifacts/*
+          compression-level: 0
+          if-no-files-found: error

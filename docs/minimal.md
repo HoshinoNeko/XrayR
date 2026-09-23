@@ -51,7 +51,12 @@ cmp XrayR XrayR-restored
 UPX 压缩的是可执行文件在磁盘上的表示，不保证减少运行内存。
 解包完整性检查不等同于目标系统运行测试。不同操作系统、架构和安全策略
 需要单独验证；不能把 Linux amd64 的结果推广到 Android、macOS 或所有平台。
-本次正常 release 文件不自动应用 UPX，避免改变完整/minimal 两版的运行兼容性。
+正常 Release 文件不自动应用 UPX，避免改变完整/minimal 两版的运行兼容性。
+发布 Release 时额外生成 Actions-only 的 UPX 副本（完整/minimal 两版），
+放在名为 `XrayR-<平台>-upx` 的 Actions Artifact 内，不上传到 GitHub Release。
+其中 tar.gz 保留可执行权限，附 SHA-256 校验文件及 UPX.txt 日志。
+使用 `--best --lzma` 并运行 `upx -t`；不支持的格式或校验失败会明确记录并跳过，
+不强制加壳、不以未压缩文件冒充 UPX 版。若两版都不支持，Artifact 只包含报告。
 参考 [UPX 官方说明](https://github.com/upx/upx/blob/devel/doc/upx-doc.txt)。
 
 ### 本地测量与验证（2026-09-23）
@@ -70,7 +75,7 @@ UPX 可明显减少磁盘占用，但不应从此推断内存占用或运行性�
 
 两版压缩副本均通过 `upx -t`，解压后 `cmp` 和 SHA-256 与原文件一致。
 本机为 macOS，未运行加壳后的 Linux 二进制；尚未完成目标平台启动、
-实际代理流量和进程管理兼容性验证，因此本次仅评估 UPX，不启用默认加壳。
+实际代理流量和进程管理兼容性验证，因此 UPX 只作为额外的实验 Artifact。
 
 Minimal 已通过 Linux amd64、Windows amd64/386、Android arm64 交叉编译；
 全仓库测试包编译（不运行外部服务测试）通过；完整/minimal 两配置的证书相关
