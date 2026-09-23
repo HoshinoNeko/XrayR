@@ -14,6 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        edition: [full, minimal, nolego]
         platform:
           - linux/amd64
           - linux/arm/v6
@@ -29,6 +30,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: suffix=${{ matrix.edition != 'full' && format('-{0}', matrix.edition) || '' }},onlatest=true
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
@@ -52,6 +54,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          build-args: EDITION=${{ matrix.edition }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
@@ -65,12 +68,15 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests
+          name: digests-${{ matrix.edition }}-${{ strategy.job-index }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
+    strategy:
+      matrix:
+        edition: [full, minimal, nolego]
     runs-on: ubuntu-latest
     needs:
       - build
@@ -78,7 +84,8 @@ jobs:
       - name: Download digests
         uses: actions/download-artifact@v4.1.7
         with:
-          name: digests
+          pattern: digests-${{ matrix.edition }}-*
+          merge-multiple: true
           path: /tmp/digests
 
       - name: Set up Docker Buildx
@@ -89,6 +96,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: suffix=${{ matrix.edition != 'full' && format('-{0}', matrix.edition) || '' }},onlatest=true
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}

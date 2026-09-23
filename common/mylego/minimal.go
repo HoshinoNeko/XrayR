@@ -1,12 +1,14 @@
-//go:build minimal
+//go:build minimal || nolego
 
 package mylego
 
 import "errors"
 
+const AutoCertificatesAvailable = false
+
 // ErrAutoCertificateDisabled is returned without contacting an ACME service or
 // writing account/certificate files. Existing certificates use CertMode: file.
-var ErrAutoCertificateDisabled = errors.New("minimal build disables automatic certificate issuance and renewal (dns/http/tls); use CertMode: file with CertFile and KeyFile, or install the full build")
+var ErrAutoCertificateDisabled = errors.New("minimal/nolego build disables automatic certificate issuance and renewal (dns/http/tls); use CertMode: file with CertFile and KeyFile, or install the full build")
 
 func New(_ *CertConfig) (*LegoCMD, error) {
 	return nil, ErrAutoCertificateDisabled

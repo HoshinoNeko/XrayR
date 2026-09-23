@@ -90,6 +90,12 @@ jobs:
           mkdir -p release
           mv $output_name release/
 
+      - name: Pack full binaries with UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+          for binary in release/*; do sh .github/build/pack-full.sh "$binary"; done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -171,6 +177,7 @@ jobs:
             echo 'ENTRYPOINT ["XrayR", "--config", "/etc/XrayR/config.yml"]' >> "Dockerfile.$os.$normalized_arch"
           fi
           echo "Dockerfile directory: $(pwd)"
+          echo 'ENV GOMEMLIMIT=40MiB' >> "Dockerfile.$os.$normalized_arch"
           echo "Target file: Dockerfile.$os.$normalized_arch"
           ls -lha Dockerfile.$os.$normalized_arch
 

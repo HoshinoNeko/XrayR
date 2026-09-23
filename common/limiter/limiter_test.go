@@ -1,11 +1,53 @@
 package limiter
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/HoshinoNeko/XrayR/api"
 	"github.com/xtls/xray-core/common/buf"
 )
+
+func TestLazyBucketConcurrentReuse(t *testing.T) {
+	l := New()
+	users := []api.UserInfo{{UID: 1, DeviceLimit: 1}}
+	if err := l.AddInboundLimiter("node", 125000, &users, nil); err != nil {
+		t.Fatal(err)
+	}
+	first, _, reject := l.GetUserBucket("node", "node||1", "192.0.2.1")
+	if reject || first == nil {
+		t.Fatal("initial bucket missing")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bucket, limited, reject := l.GetUserBucket("node", "node||1", "192.0.2.1")
+			if reject || !limited || bucket != first {
+				t.Error("cached bucket not reused")
+			}
+		}()
+	}
+	wg.Wait()
+	if _, _, reject := l.GetUserBucket("node", "node||1", "192.0.2.2"); !reject {
+		t.Fatal("device limit bypassed")
+	}
+}
+
+func BenchmarkGetUserBucketCached(b *testing.B) {
+	l := New()
+	users := []api.UserInfo{{UID: 1}}
+	if err := l.AddInboundLimiter("node", 125000, &users, nil); err != nil {
+		b.Fatal(err)
+	}
+	l.GetUserBucket("node", "node||1", "192.0.2.1")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l.GetUserBucket("node", "node||1", "192.0.2.1")
+	}
+}
 
 func TestReaddedUserDoesNotReviveOldAuthorization(t *testing.T) {
 	l := New()

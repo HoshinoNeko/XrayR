@@ -8,6 +8,9 @@ on:
       - go.sum
       - .github/workflows/build-check.yml
       - .github/workflows/release.yml
+      - .github/workflows/docker.yml
+      - .github/build/**
+      - Dockerfile
   pull_request:
   workflow_dispatch:
 
@@ -20,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        edition: [full, minimal]
+        edition: [full, minimal, nolego]
         target:
           - { os: linux, arch: amd64 }
           - { os: windows, arch: amd64 }
@@ -44,10 +47,10 @@ jobs:
             ldflags="$ldflags -checklinkname=0"
           fi
           tags=""
-          if [ "$EDITION" = "minimal" ]; then tags=minimal; fi
+          if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
           go build -mod=readonly -tags "$tags" -trimpath -ldflags "$ldflags" -o "$RUNNER_TEMP/XrayR"
-          if [ "$EDITION" = "minimal" ]; then
-            go list -mod=readonly -tags minimal -deps . > "$RUNNER_TEMP/deps.txt"
+          if [ "$EDITION" != "full" ]; then
+            go list -mod=readonly -tags "$tags" -deps . > "$RUNNER_TEMP/deps.txt"
             if grep -q '^github.com/go-acme/lego/' "$RUNNER_TEMP/deps.txt"; then
               echo "minimal must not link lego"
               exit 1
@@ -61,5 +64,12 @@ jobs:
           EDITION: ${{ matrix.edition }}
         run: |
           tags=""
-          if [ "$EDITION" = "minimal" ]; then tags=minimal; fi
-          go test -mod=readonly -tags "$tags" ./common/mylego ./service/controller -run '^(TestMinimal.*|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s
+          if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
+          go test -mod=readonly -tags "$tags" ./common/mylego ./common/limiter ./service/controller -run '^(TestMinimal.*|TestCertMonitor.*|TestLazy.*|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s
+      - name: Build image and smoke test (no publishing)
+        if: matrix.target.os == 'linux'
+        env:
+          EDITION: ${{ matrix.edition }}
+        run: |
+          docker build --build-arg EDITION="$EDITION" -t "xrayr-build-check:$EDITION" .
+          docker run --rm "xrayr-build-check:$EDITION" --help

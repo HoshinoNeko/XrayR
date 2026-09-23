@@ -91,6 +91,9 @@ Release 中后缀为 `-minimal.zip` 的版本不包含自动证书签发/续期�
 完整版继续保留全部功能。Minimal 请使用 `CertMode: file` 加载外部签发的证书；
 详见 [Minimal 配置、构建及 UPX 评估](docs/minimal.md)。
 
+也支持 `-tags nolego`，与 minimal 等价。镜像可使用 `EDITION=nolego` 构建；
+证书任务、GC 内存设置及完整版 UPX 策略见 [内存优化说明](docs/memory-tuning.md)。
+
 ## Thanks
 
 * [Project X](https://github.com/XTLS/)
@@ -111,4 +114,3 @@ Release 中后缀为 `-minimal.zip` 的版本不包含自动证书签发/续期�
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/XrayR-project/XrayR.svg)](https://starchart.cc/XrayR-project/XrayR)
-

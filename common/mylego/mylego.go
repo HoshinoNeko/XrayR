@@ -1,4 +1,4 @@
-//go:build !minimal
+//go:build !minimal && !nolego
 
 package mylego
 
@@ -12,6 +12,8 @@ import (
 )
 
 var defaultPath string
+
+const AutoCertificatesAvailable = true
 
 func New(certConf *CertConfig) (*LegoCMD, error) {
 	// Set default path to configPath/cert

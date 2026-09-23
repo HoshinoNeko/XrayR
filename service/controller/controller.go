@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -56,6 +57,9 @@ type Controller struct {
 	trafficBase     map[string]trafficSnapshot
 	accountingUsers map[string]api.UserInfo
 	stateMu         sync.Mutex
+	certTimer       *time.Timer
+	certGeneration  uint64
+	closed          bool
 	startAt         time.Time
 	suspended       bool
 	logger          *log.Entry
@@ -184,14 +188,9 @@ func (c *Controller) startPeriodicTasks() error {
 			}},
 	)
 
-	if c.config.CertConfig != nil {
-		c.tasks = append(c.tasks, periodicTask{
-			tag: "cert monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second * 60,
-				Execute:  c.certMonitor,
-			}})
-	}
+	c.stateMu.Lock()
+	c.syncCertMonitorLocked()
+	c.stateMu.Unlock()
 
 	for i := range c.tasks {
 		c.logger.Printf("Start %s periodic task", c.tasks[i].tag)
@@ -212,6 +211,8 @@ func (c *Controller) Close() error {
 	}
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
+	c.closed = true
+	c.syncCertMonitorLocked()
 	c.portHopping.Remove()
 	_ = c.DeleteInboundLimiter(c.Tag)
 	_ = c.removeOldTag(c.Tag)
@@ -231,7 +232,17 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		return nil
 	}
 	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	releaseMemory := false
+	defer func() {
+		c.syncCertMonitorLocked()
+		c.stateMu.Unlock()
+		if releaseMemory {
+			debug.FreeOSMemory()
+		}
+	}()
+	if c.closed {
+		return nil
+	}
 
 	// First fetch Node Info
 	var nodeInfoChanged = true
@@ -310,6 +321,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		c.userList = newUserInfo
 		c.suspended = false
 		c.logger.Print("Node re-enabled")
+		releaseMemory = true
 		return nil
 	}
 	if newNodeInfo.Port == 0 {
@@ -429,6 +441,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			}
 			c.userList = newUserInfo
 			committed = true
+			releaseMemory = true
 			nodeInfoChanged = false
 			usersChanged = false
 		} else {
@@ -888,15 +901,14 @@ func (c *Controller) buildNodeTag() string {
 // }
 
 // Check Cert
-func (c *Controller) certMonitor() error {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+func (c *Controller) certMonitorLocked() error {
 	if c.nodeInfo.EnableTLS && c.config.CertConfig != nil && c.config.EnableREALITY == false {
 		switch c.config.CertConfig.CertMode {
 		case "dns", "http", "tls":
 			lego, err := mylego.New(c.config.CertConfig)
 			if err != nil {
 				c.logger.Print(err)
+				return err
 			}
 			// Xray-core supports the OcspStapling certification hot renew
 			_, _, _, err = lego.RenewCert()

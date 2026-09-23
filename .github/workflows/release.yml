@@ -179,6 +179,16 @@ jobs:
           if [ "$GOARCH" = "mips" ] || [ "$GOARCH" = "mipsle" ]; then
             GOMIPS=softfloat go build -mod=readonly -tags minimal -trimpath -ldflags "$ldflags" -o build_assets-minimal/XrayR_softfloat
           fi
+      - name: Pack full edition with UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+          for binary in build_assets/XrayR build_assets/XrayR.exe build_assets/XrayR_softfloat; do
+            if [ -f "$binary" ]; then sh .github/build/pack-full.sh "$binary"; fi
+          done
+          if [ "$GOOS" = linux ] && [ "$GOARCH" = amd64 ]; then
+            ./build_assets/XrayR --help
+          fi
       - name: Create ZIP archives
         shell: bash
         run: |

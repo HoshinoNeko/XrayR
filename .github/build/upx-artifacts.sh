@@ -7,7 +7,7 @@ report="$PWD/upx_artifacts/UPX.txt"
 upx --version > "$report"
 printf '\nFlags: --best --lzma\nExperimental copies; target-platform runtime compatibility is not guaranteed.\n' >> "$report"
 
-for suffix in "" "-minimal"; do
+for suffix in ""; do
   name="XrayR-$ASSET_NAME$suffix"
   source_dir="$PWD/$name"
   stage=$(mktemp -d)
@@ -20,7 +20,9 @@ for suffix in "" "-minimal"; do
     found=true
     packed="$stage/$binary.upx"
     # Do not force unsupported formats, and never label an unpacked fallback as UPX.
-    if upx --best --lzma -o "$packed" "$original" >> "$report" 2>&1 &&
+    if upx -t "$original" >> "$report" 2>&1; then
+      printf '\nAlready packed: %s\n' "$original" >> "$report"
+    elif upx --best --lzma -o "$packed" "$original" >> "$report" 2>&1 &&
        upx -t "$packed" >> "$report" 2>&1; then
       mv "$packed" "$stage/$name/$binary"
     else
