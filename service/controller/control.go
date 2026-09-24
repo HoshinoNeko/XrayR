@@ -35,6 +35,7 @@ func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
 		return fmt.Errorf("not an InboundHandler: %s", err)
 	}
 	if err := c.ibm.AddHandler(context.Background(), handler); err != nil {
+		_ = handler.Close()
 		return err
 	}
 	return nil
@@ -50,6 +51,7 @@ func (c *Controller) addOutbound(config *core.OutboundHandlerConfig) error {
 		return fmt.Errorf("not an InboundHandler: %s", err)
 	}
 	if err := c.obm.AddHandler(context.Background(), handler); err != nil {
+		_ = handler.Close()
 		return err
 	}
 	return nil
@@ -73,6 +75,14 @@ func (c *Controller) addUsers(users []*protocol.User, tag string) error {
 		mUser, err := item.ToMemoryUser()
 		if err != nil {
 			return err
+		}
+		if existing := userManager.GetUser(context.Background(), mUser.Email); existing != nil {
+			if existing.Account.Equals(mUser.Account) {
+				continue
+			}
+			if err := userManager.RemoveUser(context.Background(), mUser.Email); err != nil {
+				return err
+			}
 		}
 		err = userManager.AddUser(context.Background(), mUser)
 		if err != nil {
@@ -100,6 +110,9 @@ func (c *Controller) removeUsers(users []string, tag string) error {
 		return fmt.Errorf("handler %s is not implement proxy.UserManager", err)
 	}
 	for _, email := range users {
+		if userManager.GetUser(context.Background(), email) == nil {
+			continue
+		}
 		err = userManager.RemoveUser(context.Background(), email)
 		if err != nil {
 			return err

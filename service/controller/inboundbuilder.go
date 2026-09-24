@@ -41,7 +41,7 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 	// SniffingConfig
 	sniffingConfig := &conf.SniffingConfig{
 		Enabled:      true,
-		DestOverride: &conf.StringList{"http", "tls", "quic", "fakedns"},
+		DestOverride: conf.StringList{"http", "tls", "quic", "fakedns"},
 	}
 	if config.DisableSniffing {
 		sniffingConfig.Enabled = false
@@ -123,6 +123,24 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 		if nodeInfo.Hysteria2 == nil || nodeInfo.Hysteria2.Version != 2 {
 			return nil, fmt.Errorf("hysteria2 version must be 2")
 		}
+		if mask := nodeInfo.Hysteria2.FinalMask; mask != nil {
+			for _, udp := range mask.Udp {
+				if udp.Type == "salamander" {
+					var settings struct {
+						Password string `json:"password"`
+					}
+					if udp.Settings == nil {
+						return nil, fmt.Errorf("salamander settings are required")
+					}
+					if err := json.Unmarshal(*udp.Settings, &settings); err != nil {
+						return nil, err
+					}
+					if len(settings.Password) < 4 {
+						return nil, fmt.Errorf("salamander password must be at least 4 bytes")
+					}
+				}
+			}
+		}
 		protocol = "hysteria"
 		proxySetting = &conf.HysteriaServerConfig{Version: 2}
 
@@ -200,7 +218,18 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 			UdpIdleTimeout: nodeInfo.Hysteria2.UDPIdleTimeout,
 			Masquerade:     nodeInfo.Hysteria2.Masquerade,
 		}
-		streamSetting.FinalMask = nodeInfo.Hysteria2.FinalMask
+		if mask := nodeInfo.Hysteria2.FinalMask; mask != nil {
+			serverMask := *mask
+			serverMask.Udp = nil
+			for _, item := range mask.Udp {
+				// v26.9.9 udphop is client-only; server forwarding is managed
+				// separately by portHopping/iptables. Never mutate panel state.
+				if item.Type != "udphop" {
+					serverMask.Udp = append(serverMask.Udp, item)
+				}
+			}
+			streamSetting.FinalMask = &serverMask
+		}
 	}
 	streamSetting.Network = &transportProtocol
 
@@ -253,6 +282,9 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 		}
 		tlsSettings := &conf.TLSConfig{
 			RejectUnknownSNI: config.CertConfig.RejectUnknownSni,
+		}
+		if isHysteria2 {
+			tlsSettings.ALPN = &conf.StringList{"h3"}
 		}
 		tlsSettings.Certs = append(tlsSettings.Certs, &conf.TLSCertConfig{CertFile: certFile, KeyFile: keyFile, OcspStapling: 3600})
 		streamSetting.TLSSettings = tlsSettings

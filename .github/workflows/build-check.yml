@@ -1,0 +1,75 @@
+name: Cross-platform build check
+
+on:
+  push:
+    paths:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+      - .github/workflows/build-check.yml
+      - .github/workflows/release.yml
+      - .github/workflows/docker.yml
+      - .github/build/**
+      - Dockerfile
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [full, minimal, nolego]
+        target:
+          - { os: linux, arch: amd64 }
+          - { os: windows, arch: amd64 }
+          - { os: windows, arch: '386' }
+          - { os: android, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go mod download
+      - name: Build without changing module files
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+          EDITION: ${{ matrix.edition }}
+        run: |
+          ldflags="-s -w -buildid="
+          if [ "$GOOS" = "android" ]; then
+            ldflags="$ldflags -checklinkname=0"
+          fi
+          tags=""
+          if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
+          go build -mod=readonly -tags "$tags" -trimpath -ldflags "$ldflags" -o "$RUNNER_TEMP/XrayR"
+          if [ "$EDITION" != "full" ]; then
+            go list -mod=readonly -tags "$tags" -deps . > "$RUNNER_TEMP/deps.txt"
+            if grep -q '^github.com/go-acme/lego/' "$RUNNER_TEMP/deps.txt"; then
+              echo "minimal must not link lego"
+              exit 1
+            fi
+          fi
+          git diff --exit-code -- go.mod go.sum
+      - name: Certificate and Hysteria2 basic regression
+        if: matrix.target.os == 'linux'
+        env:
+          CGO_ENABLED: '0'
+          EDITION: ${{ matrix.edition }}
+        run: |
+          tags=""
+          if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
+          go test -mod=readonly -tags "$tags" ./common/mylego ./common/limiter ./service/controller ./app/mydispatcher ./panel -run '^(TestMinimal.*|TestCertMonitor.*|TestLazy.*|TestStaticInbound.*|TestBufferedReader.*|TestCustomInboundConnectivity|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s
+      - name: Build image and smoke test (no publishing)
+        if: matrix.target.os == 'linux'
+        env:
+          EDITION: ${{ matrix.edition }}
+        run: |
+          docker build --build-arg EDITION="$EDITION" -t "xrayr-build-check:$EDITION" .
+          docker run --rm "xrayr-build-check:$EDITION" --help

@@ -23,6 +23,8 @@ import (
 )
 
 type UserInfo struct {
+	UUID        string
+	generation  *uint64
 	UID         int
 	SpeedLimit  uint64
 	DeviceLimit int
@@ -41,7 +43,22 @@ type InboundInfo struct {
 }
 
 type Limiter struct {
-	InboundInfo *sync.Map // Key: Tag, Value: *InboundInfo
+	InboundInfo    *sync.Map // Key: Tag, Value: *InboundInfo
+	staticInbounds sync.Map  // Explicit local configuration; never inferred from missing users.
+}
+
+// RegisterStaticInbound is called before the core starts accepting connections.
+func (l *Limiter) RegisterStaticInbound(tag string) error {
+	if _, exists := l.InboundInfo.Load(tag); exists {
+		return fmt.Errorf("inbound %q is already panel-managed", tag)
+	}
+	l.staticInbounds.Store(tag, struct{}{})
+	return nil
+}
+
+func (l *Limiter) IsStaticInbound(tag string) bool {
+	_, ok := l.staticInbounds.Load(tag)
+	return ok
 }
 
 func New() *Limiter {
@@ -51,6 +68,9 @@ func New() *Limiter {
 }
 
 func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalLimit *GlobalDeviceLimitConfig) error {
+	if l.IsStaticInbound(tag) {
+		return fmt.Errorf("panel inbound %q conflicts with a local custom inbound", tag)
+	}
 	inboundInfo := &InboundInfo{
 		Tag:            tag,
 		NodeSpeedLimit: nodeSpeedLimit,
@@ -86,7 +106,9 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 	userMap := new(sync.Map)
 	for _, u := range *userList {
 		userMap.Store(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID), UserInfo{
+			generation:  new(uint64),
 			UID:         u.UID,
+			UUID:        u.UUID,
 			SpeedLimit:  u.SpeedLimit,
 			DeviceLimit: u.DeviceLimit,
 		})
@@ -101,8 +123,15 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 		inboundInfo := value.(*InboundInfo)
 		// Update User info
 		for _, u := range *updatedUserList {
+			key := fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
+			generation := new(uint64)
+			if old, ok := inboundInfo.UserInfo.Load(key); ok {
+				generation = old.(UserInfo).generation
+			}
 			inboundInfo.UserInfo.Store(fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID), UserInfo{
+				generation:  generation,
 				UID:         u.UID,
+				UUID:        u.UUID,
 				SpeedLimit:  u.SpeedLimit,
 				DeviceLimit: u.DeviceLimit,
 			})
@@ -148,6 +177,38 @@ func (l *Limiter) HasUser(tag, email string) bool {
 	}
 	_, ok = value.(*InboundInfo).UserInfo.Load(email)
 	return ok
+}
+
+func (l *Limiter) MatchesUUID(tag, email, uuid string) bool {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return false
+	}
+	user, ok := value.(*InboundInfo).UserInfo.Load(email)
+	return ok && user.(UserInfo).UUID == uuid
+}
+
+// Permission binds a connection to one authorization generation. Removing and
+// re-adding the same UID must not authorize a previously authenticated stream.
+func (l *Limiter) Permission(tag, email string) func() bool {
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return func() bool { return false }
+	}
+	info := value.(*InboundInfo)
+	user, ok := info.UserInfo.Load(email)
+	if !ok {
+		return func() bool { return false }
+	}
+	generation := user.(UserInfo).generation
+	return func() bool {
+		current, ok := l.InboundInfo.Load(tag)
+		if !ok || current != info {
+			return false
+		}
+		user, ok := info.UserInfo.Load(email)
+		return ok && user.(UserInfo).generation == generation
+	}
 }
 
 func (l *Limiter) DeleteInboundLimiter(tag string) error {
@@ -207,21 +268,27 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 		}
 
 		// Local device limit
-		ipMap := new(sync.Map)
-		ipMap.Store(ip, uid)
-		// If any device is online
-		if v, ok := inboundInfo.UserOnlineIP.LoadOrStore(email, ipMap); ok {
+		v, online := inboundInfo.UserOnlineIP.Load(email)
+		if !online {
+			ipMap := new(sync.Map)
+			ipMap.Store(ip, uid)
+			v, online = inboundInfo.UserOnlineIP.LoadOrStore(email, ipMap)
+		}
+		// Reuse the winning map, including when concurrent first requests race.
+		if online {
 			ipMap := v.(*sync.Map)
 			// If this is a new ip
-			if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
-				counter := 0
-				ipMap.Range(func(key, value interface{}) bool {
-					counter++
-					return true
-				})
-				if counter > deviceLimit && deviceLimit > 0 {
-					ipMap.Delete(ip)
-					return nil, false, true
+			if _, known := ipMap.Load(ip); !known {
+				if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
+					counter := 0
+					ipMap.Range(func(key, value interface{}) bool {
+						counter++
+						return true
+					})
+					if counter > deviceLimit && deviceLimit > 0 {
+						ipMap.Delete(ip)
+						return nil, false, true
+					}
 				}
 			}
 		}
@@ -236,6 +303,9 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 		// Speed limit
 		limit := determineRate(nodeLimit, userLimit) // Determine the speed limit rate
 		if limit > 0 {
+			if v, ok := inboundInfo.BucketHub.Load(email); ok {
+				return v.(*rate.Limiter), true, false
+			}
 			limiter := rate.NewLimiter(rate.Limit(limit), int(limit)) // Byte/s
 			if v, ok := inboundInfo.BucketHub.LoadOrStore(email, limiter); ok {
 				bucket := v.(*rate.Limiter)

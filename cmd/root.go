@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -88,8 +88,6 @@ func run() error {
 			// Hot reload function
 			fmt.Println("Config file changed:", e.Name)
 			p.Close()
-			// Delete old instance and trigger GC
-			runtime.GC()
 			if err := config.Unmarshal(panelConfig); err != nil {
 				log.Panicf("Parse config file %v failed: %s \n", cfgFile, err)
 			}
@@ -99,6 +97,7 @@ func run() error {
 			}
 
 			p.Start()
+			debug.FreeOSMemory()
 			lastTime = time.Now()
 		}
 	})
@@ -107,7 +106,7 @@ func run() error {
 	defer p.Close()
 
 	// Explicitly triggering GC to remove garbage from config loading.
-	runtime.GC()
+	debug.FreeOSMemory()
 	// Running backend
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, os.Interrupt, os.Kill, syscall.SIGTERM)

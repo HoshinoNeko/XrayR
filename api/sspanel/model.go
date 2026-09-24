@@ -2,6 +2,8 @@ package sspanel
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
 
 	"github.com/xtls/xray-core/infra/conf"
 )
@@ -21,7 +23,7 @@ type NodeInfoResponse struct {
 }
 
 type CustomConfig struct {
-	OffsetPortNode string           `json:"offset_port_node"`
+	OffsetPortNode PortString       `json:"offset_port_node"`
 	Host           string           `json:"host"`
 	Method         string           `json:"method"`
 	TLS            string           `json:"tls"`
@@ -39,6 +41,22 @@ type CustomConfig struct {
 	EnableREALITY  bool             `json:"enable_reality"`
 	RealityOpts    *REALITYConfig   `json:"reality-opts"`
 	Hysteria2      *Hysteria2Config `json:"hysteria2"`
+}
+
+// PortString accepts both JSON integer and string ports used by panel editors.
+type PortString string
+
+func (p *PortString) UnmarshalJSON(raw []byte) error {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		value = string(raw)
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("port must be an integer between 1 and 65535")
+	}
+	*p = PortString(strconv.Itoa(port))
+	return nil
 }
 
 type Hysteria2Config struct {

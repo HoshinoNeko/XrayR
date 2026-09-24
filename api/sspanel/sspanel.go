@@ -45,6 +45,7 @@ type APIClient struct {
 	access              sync.Mutex
 	trafficPending      []UserTraffic
 	trafficReportID     string
+	trafficConfirmed    []UserTraffic
 	version             string
 	eTags               map[string]string
 }
@@ -172,7 +173,6 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	res, err := c.client.R().
 		SetResult(&Response{}).
 		SetHeader("X-XrayR-Capabilities", "node-state-v1,hysteria2-v1,traffic-report-id-v1").
-		SetHeader("If-None-Match", c.eTags["node"]).
 		ForceContentType("application/json").
 		Get(path)
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
@@ -197,6 +197,10 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 
 	// determine ssPanel version, if disable custom config or version < 2021.11, then use old api
 	c.version = nodeInfoResponse.Version
+	// Disabling a node must work even if its newly saved protocol config is invalid.
+	if nodeInfoResponse.Enabled != nil && !*nodeInfoResponse.Enabled {
+		return &api.NodeInfo{Disabled: true, NodeID: c.NodeID, NodeType: c.NodeType}, nil
+	}
 	var isExpired bool
 	if compareVersion(c.version, "2021.11") == -1 {
 		isExpired = true
@@ -244,7 +248,6 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	path := "/mod_mu/users"
 	res, err := c.client.R().
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
-		SetHeader("If-None-Match", c.eTags["users"]).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
@@ -334,23 +337,31 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	c.access.Lock()
 	defer c.access.Unlock()
 
-	current := make([]UserTraffic, len(*userTraffic))
-	for i, traffic := range *userTraffic {
-		current[i] = UserTraffic{
-			UID:      traffic.UID,
-			Upload:   traffic.Upload,
-			Download: traffic.Download}
+	totals := make(map[int]UserTraffic)
+	for _, traffic := range *userTraffic {
+		item := totals[traffic.UID]
+		item.UID = traffic.UID
+		item.Upload += traffic.Upload
+		item.Download += traffic.Download
+		totals[traffic.UID] = item
 	}
+	current := make([]UserTraffic, 0, len(totals))
+	for _, item := range totals {
+		current = append(current, item)
+	}
+	current = subtractTraffic(current, c.trafficConfirmed)
 
 	if len(c.trafficPending) > 0 {
 		if err := c.sendUserTraffic(c.trafficPending, c.trafficReportID); err != nil {
 			return err
 		}
 		current = subtractTraffic(current, c.trafficPending)
+		c.trafficConfirmed = append(c.trafficConfirmed, c.trafficPending...)
 		c.trafficPending = nil
 		c.trafficReportID = ""
 	}
 	if len(current) == 0 {
+		c.trafficConfirmed = nil
 		return nil
 	}
 	reportID, err := newReportID()
@@ -364,6 +375,7 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	}
 	c.trafficPending = nil
 	c.trafficReportID = ""
+	c.trafficConfirmed = nil
 	return nil
 }
 
@@ -392,7 +404,10 @@ func newReportID() (string, error) {
 func subtractTraffic(current, reported []UserTraffic) []UserTraffic {
 	old := make(map[int]UserTraffic, len(reported))
 	for _, item := range reported {
-		old[item.UID] = item
+		total := old[item.UID]
+		total.Upload += item.Upload
+		total.Download += item.Download
+		old[item.UID] = total
 	}
 	result := make([]UserTraffic, 0, len(current))
 	for _, item := range current {
@@ -787,11 +802,10 @@ func (c *APIClient) ParseUserListResponse(userInfoResponse *[]UserResponse) (*[]
 			}
 		}
 
-		if c.SpeedLimit > 0 {
-			speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-		} else {
-			speedLimit = uint64((user.SpeedLimit * 1000000) / 8)
-		}
+		// Keep the panel's per-user limit independent from the optional local
+		// node-wide limit. The limiter applies the lower of both values, which
+		// preserves SSPanel's keep_connect=1 exhausted-user limit of 1 Mbps.
+		speedLimit = uint64((user.SpeedLimit * 1000000) / 8)
 		userList = append(userList, api.UserInfo{
 			UID:         user.ID,
 			UUID:        user.UUID,
@@ -837,7 +851,7 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 		speedLimit = uint64((nodeInfoResponse.SpeedLimit * 1000000) / 8)
 	}
 
-	parsedPort, err := strconv.ParseInt(nodeConfig.OffsetPortNode, 10, 32)
+	parsedPort, err := strconv.ParseInt(string(nodeConfig.OffsetPortNode), 10, 32)
 	if err != nil {
 		return nil, err
 	}
