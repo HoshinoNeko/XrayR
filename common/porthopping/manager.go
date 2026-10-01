@@ -3,6 +3,7 @@ package porthopping
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -18,16 +19,62 @@ type rule struct {
 type Manager struct {
 	mu    sync.Mutex
 	rules []rule
+	// Injectable command execution keeps firewall lifecycle tests unprivileged.
+	commands firewallCommands
+	goos     string
 }
 
 func New() *Manager { return &Manager{} }
+
+type firewallCommands interface {
+	LookPath(string) (string, error)
+	Run(string, ...string) ([]byte, error)
+}
+
+type systemCommands struct{}
+
+func (systemCommands) LookPath(name string) (string, error) { return exec.LookPath(name) }
+func (systemCommands) Run(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+func (m *Manager) executor() firewallCommands {
+	if m.commands != nil {
+		return m.commands
+	}
+	return systemCommands{}
+}
+
+func firewallFamilies(listenIP string) ([]string, error) {
+	// Xray-core uses net.ListenPacket("udp", ...), not udp4/udp6. Go uses
+	// a dual-stack socket for wildcard addresses when the OS supports it,
+	// including 0.0.0.0. A concrete address only accepts its own family.
+	if listenIP == "" {
+		return []string{"iptables", "ip6tables"}, nil
+	}
+	ip := net.ParseIP(listenIP)
+	if ip == nil {
+		return nil, fmt.Errorf("automatic port hopping requires an IP listen address: %q", listenIP)
+	}
+	if ip.IsUnspecified() {
+		return []string{"iptables", "ip6tables"}, nil
+	}
+	if ip.To4() != nil {
+		return []string{"iptables"}, nil
+	}
+	return []string{"ip6tables"}, nil
+}
 
 // Apply checks firewall availability and privileges before adding idempotent
 // UDP REDIRECT rules. Existing rules owned by this manager are removed first.
 func (m *Manager) Apply(ports string, target uint32, tag, listenIP string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if runtime.GOOS != "linux" {
+	goos := m.goos
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goos != "linux" {
 		return fmt.Errorf("automatic port hopping firewall setup is supported on Linux only")
 	}
 	if target == 0 || target > 65535 {
@@ -37,33 +84,41 @@ func (m *Manager) Apply(ports string, target uint32, tag, listenIP string) error
 	if err != nil {
 		return err
 	}
-	commandName := "iptables"
-	if strings.Contains(listenIP, ":") {
-		commandName = "ip6tables"
-	}
-	command, err := exec.LookPath(commandName)
+	families, err := firewallFamilies(listenIP)
 	if err != nil {
-		return fmt.Errorf("%s is required for automatic port hopping: %w", commandName, err)
+		return err
 	}
-	if output, err := exec.Command(command, "-w", "-t", "nat", "-S", "PREROUTING").CombinedOutput(); err != nil {
-		return fmt.Errorf("%s preflight failed (root/CAP_NET_ADMIN required): %w: %s", commandName, err, strings.TrimSpace(string(output)))
+	executor := m.executor()
+	commands := make([]string, 0, len(families))
+	// Check every required family before changing any existing rules.
+	for _, name := range families {
+		command, err := executor.LookPath(name)
+		if err != nil {
+			return fmt.Errorf("%s is required for automatic port hopping: %w", name, err)
+		}
+		if output, err := executor.Run(command, "-w", "-t", "nat", "-S", "PREROUTING"); err != nil {
+			return fmt.Errorf("%s preflight failed (NAT support and root/CAP_NET_ADMIN required): %w: %s", name, err, strings.TrimSpace(string(output)))
+		}
+		commands = append(commands, command)
 	}
 
 	m.removeLocked()
 	comment := fmt.Sprintf("XrayR-hy2-%x", sha256.Sum256([]byte(tag)))[:27]
-	for _, portRange := range ranges {
-		spec := []string{"PREROUTING", "-p", "udp", "--dport", portRange, "-m", "comment", "--comment", comment, "-j", "REDIRECT", "--to-ports", strconv.FormatUint(uint64(target), 10)}
-		check := append([]string{"-w", "-t", "nat", "-C"}, spec...)
-		if err := exec.Command(command, check...).Run(); err == nil {
+	for _, command := range commands {
+		for _, portRange := range ranges {
+			spec := []string{"PREROUTING", "-p", "udp", "--dport", portRange, "-m", "comment", "--comment", comment, "-j", "REDIRECT", "--to-ports", strconv.FormatUint(uint64(target), 10)}
+			check := append([]string{"-w", "-t", "nat", "-C"}, spec...)
+			if _, err := executor.Run(command, check...); err == nil {
+				m.rules = append(m.rules, rule{command: command, args: append([]string{"-w", "-t", "nat", "-D"}, spec...)})
+				continue
+			}
+			add := append([]string{"-w", "-t", "nat", "-A"}, spec...)
+			if output, err := executor.Run(command, add...); err != nil {
+				m.removeLocked()
+				return fmt.Errorf("%s add port hopping rule %s failed: %w: %s", command, portRange, err, strings.TrimSpace(string(output)))
+			}
 			m.rules = append(m.rules, rule{command: command, args: append([]string{"-w", "-t", "nat", "-D"}, spec...)})
-			continue
 		}
-		add := append([]string{"-w", "-t", "nat", "-A"}, spec...)
-		if output, err := exec.Command(command, add...).CombinedOutput(); err != nil {
-			m.removeLocked()
-			return fmt.Errorf("add port hopping rule %s failed: %w: %s", portRange, err, strings.TrimSpace(string(output)))
-		}
-		m.rules = append(m.rules, rule{command: command, args: append([]string{"-w", "-t", "nat", "-D"}, spec...)})
 	}
 	return nil
 }
@@ -76,7 +131,7 @@ func (m *Manager) Remove() {
 
 func (m *Manager) removeLocked() {
 	for i := len(m.rules) - 1; i >= 0; i-- {
-		_ = exec.Command(m.rules[i].command, m.rules[i].args...).Run()
+		_, _ = m.executor().Run(m.rules[i].command, m.rules[i].args...)
 	}
 	m.rules = nil
 }
