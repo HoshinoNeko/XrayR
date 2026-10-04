@@ -20,6 +20,7 @@ import (
 	"github.com/go-resty/resty/v2"
 
 	"github.com/HoshinoNeko/XrayR/api"
+	"github.com/HoshinoNeko/XrayR/common/porthopping"
 )
 
 var (
@@ -934,17 +935,24 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 	}
 	if nodeConfig.Hysteria2 != nil {
 		h := nodeConfig.Hysteria2
+		hop, err := porthopping.ResolveConfig(nodeInfoResponse.CustomConfig,
+			[]string{"portHopping"},
+			[]string{"hysteria2", "portHopping"},
+			[]string{"hysteria2", "finalmask", "quicParams", "udpHop"})
+		if err != nil {
+			return nil, err
+		}
 		nodeInfo.Hysteria2 = &api.Hysteria2Config{
 			Version:        h.Version,
 			UDPIdleTimeout: h.UDPIdleTimeout,
 			Masquerade:     h.Masquerade,
 			FinalMask:      h.FinalMask,
 		}
-		if h.PortHopping != nil {
+		if hop != nil {
 			nodeInfo.Hysteria2.PortHopping = &api.PortHoppingConfig{
-				Enabled:               h.PortHopping.Enabled,
-				AutoConfigureFirewall: h.PortHopping.AutoConfigureFirewall,
-				Ports:                 h.PortHopping.Ports,
+				Enabled:               hop.Enabled,
+				AutoConfigureFirewall: hop.AutoConfigureFirewall,
+				Ports:                 hop.Ports,
 			}
 		}
 	}

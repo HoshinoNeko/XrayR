@@ -60,11 +60,12 @@ func (p *PortString) UnmarshalJSON(raw []byte) error {
 }
 
 type Hysteria2Config struct {
-	Version        int32              `json:"version"`
-	UDPIdleTimeout int64              `json:"udpIdleTimeout"`
-	Masquerade     conf.Masquerade    `json:"masquerade"`
-	FinalMask      *conf.FinalMask    `json:"finalmask"`
-	PortHopping    *PortHoppingConfig `json:"portHopping"`
+	Version        int32           `json:"version"`
+	UDPIdleTimeout int64           `json:"udpIdleTimeout"`
+	Masquerade     conf.Masquerade `json:"masquerade"`
+	FinalMask      *conf.FinalMask `json:"finalmask"`
+	// Deployment extensions are resolved from raw custom_config by precedence.
+	PortHopping *PortHoppingConfig `json:"-"`
 }
 
 type PortHoppingConfig struct {

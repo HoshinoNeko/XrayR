@@ -31,11 +31,14 @@ import (
 
 // Panel Structure
 type Panel struct {
-	access      sync.Mutex
-	panelConfig *Config
-	Server      *core.Instance
-	Service     []service.Service
-	Running     bool
+	access                 sync.Mutex
+	panelConfig            *Config
+	Server                 *core.Instance
+	Service                []service.Service
+	Running                bool
+	customHoppingPlans     []customHoppingPlan
+	customHoppingFirewalls []hoppingFirewall
+	newHoppingFirewall     func() hoppingFirewall
 }
 
 func New(panelConfig *Config) *Panel {
@@ -95,12 +98,13 @@ func (p *Panel) loadCore(panelConfig *Config) *core.Instance {
 	}
 	// Custom Inbound config
 	var coreCustomInboundConfig []conf.InboundDetourConfig
+	p.customHoppingPlans = nil
 	if panelConfig.InboundConfigPath != "" {
 		if data, err := os.ReadFile(panelConfig.InboundConfigPath); err != nil {
-			log.Panicf("Failed to read Custom Inbound config file at: %s", panelConfig.OutboundConfigPath)
+			log.Panicf("Failed to read Custom Inbound config file at %s: %s", panelConfig.InboundConfigPath, err)
 		} else {
-			if err = json.Unmarshal(data, &coreCustomInboundConfig); err != nil {
-				log.Panicf("Failed to unmarshal Custom Inbound config: %s", panelConfig.OutboundConfigPath)
+			if coreCustomInboundConfig, p.customHoppingPlans, err = parseCustomInbounds(data); err != nil {
+				log.Panicf("Failed to parse Custom Inbound config at %s: %s", panelConfig.InboundConfigPath, err)
 			}
 		}
 	}
@@ -170,13 +174,36 @@ func (p *Panel) loadCore(panelConfig *Config) *core.Instance {
 func (p *Panel) Start() {
 	p.access.Lock()
 	defer p.access.Unlock()
+	if p.Running {
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			// Cleanup must run for any startup panic, including a panel service failure.
+			defer p.removeCustomPortHopping()
+			if p.Server != nil {
+				defer p.Server.Close()
+			}
+			services := p.Service
+			p.Service = nil
+			p.Server = nil
+			p.Running = false
+			for _, s := range services {
+				_ = s.Close()
+			}
+		}
+	}()
 	log.Print("Start the panel..")
 	// Load Core
 	server := p.loadCore(p.panelConfig)
+	p.Server = server
 	if err := server.Start(); err != nil {
 		log.Panicf("Failed to start instance: %s", err)
 	}
-	p.Server = server
+	if err := p.applyCustomPortHopping(); err != nil {
+		log.Panicf("Custom inbound port hopping failed: %s", err)
+	}
 
 	// Load Nodes config
 	for _, nodeConfig := range p.panelConfig.NodesConfig {
@@ -220,6 +247,7 @@ func (p *Panel) Start() {
 		}
 	}
 	p.Running = true
+	started = true
 	return
 }
 
@@ -227,15 +255,21 @@ func (p *Panel) Start() {
 func (p *Panel) Close() {
 	p.access.Lock()
 	defer p.access.Unlock()
+	defer func() {
+		p.removeCustomPortHopping()
+		if p.Server != nil {
+			_ = p.Server.Close()
+		}
+		p.Server = nil
+		p.Service = nil
+		p.Running = false
+	}()
 	for _, s := range p.Service {
 		err := s.Close()
 		if err != nil {
 			log.Panicf("Panel Close failed: %s", err)
 		}
 	}
-	p.Service = nil
-	p.Server.Close()
-	p.Running = false
 	return
 }
 

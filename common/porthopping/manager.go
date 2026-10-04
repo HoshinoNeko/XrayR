@@ -26,6 +26,12 @@ type Manager struct {
 
 func New() *Manager { return &Manager{} }
 
+// ValidatePorts checks a redirect range without changing the host firewall.
+func ValidatePorts(ports string) error {
+	_, err := parsePorts(ports)
+	return err
+}
+
 type firewallCommands interface {
 	LookPath(string) (string, error)
 	Run(string, ...string) ([]byte, error)
