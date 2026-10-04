@@ -87,6 +87,16 @@ cleans up the new rules in both families after a partial installation failure. W
 `autoConfigureFirewall: false`, provision equivalent UDP forwarding outside
 XrayR.
 
+Port-hopping deployment settings can also be placed at `custom_config.portHopping`.
+Precedence is `custom_config.portHopping` > `custom_config.hysteria2.portHopping` >
+`custom_config.hysteria2.finalmask.quicParams.udpHop`. The selected object is not
+merged with lower-priority settings. An explicit disabled/empty top-level object
+prevents fallback; absent/null objects allow fallback. Both `enabled` and the legacy
+`enable` spelling accept JSON booleans, with conflicting aliases rejected.
+Legacy `udpHop` objects containing only `ports` retain their implicit enabled
+subscription behavior. SSPanel's admin validation and subscriptions use this same
+precedence. For a static custom inbound, see [automatic port hopping](custom-inbound-port-hopping.md).
+
 For example, forwarding `50000-55000` to the node's listening port `50000`
 creates a UDP `REDIRECT` in each family's NAT `PREROUTING` chain. Verify both:
 

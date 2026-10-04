@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func (a *lifecycleAPI) ReportUserTraffic(u *[]api.UserTraffic) error {
 
 func TestHysteriaLifecycleAndTCPForwarding(t *testing.T) {
 	for _, mode := range []string{"plain", "salamander", "salamander_udphop"} {
-		t.Run(mode, func(t *testing.T) { testHysteriaLifecycle(t, mode, 11, 4096, 16000) })
+		t.Run(mode, func(t *testing.T) { testHysteriaLifecycle(t, mode, 11, 1200, 4096, 8192, 16000, 65507) })
 	}
 }
 
@@ -215,12 +216,43 @@ func testHysteriaLifecycle(t *testing.T, mode string, sizes ...int) {
 	}
 	for _, size := range sizes {
 		udpConn.SetDeadline(time.Now().Add(5 * time.Second))
-		payload := bytes.Repeat([]byte{byte(size % 251)}, size)
+		payload := make([]byte, size)
+		for i := range payload {
+			payload[i] = byte(i*31 + i/251)
+		}
+		// macOS defaults to a 9216-byte native UDP limit. Detect only the
+		// OS-level restriction; do not hide failures in the proxy path.
+		probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, probeErr := probe.WriteTo(payload, probe.LocalAddr())
+		probe.Close()
+		if errors.Is(probeErr, syscall.EMSGSIZE) {
+			t.Logf("native UDP payload %d exceeds this host's socket limit; protocol-level large-packet coverage remains in xray-core", size)
+			continue
+		}
+		if probeErr != nil {
+			t.Fatal(probeErr)
+		}
 		if _, err = udpConn.Write(payload); err != nil {
 			t.Fatal(err)
 		}
 		udpData := make([]byte, 65535)
-		n, err := udpConn.Read(udpData)
+		type readResult struct {
+			n   int
+			err error
+		}
+		readDone := make(chan readResult, 1)
+		go func() { n, err := udpConn.Read(udpData); readDone <- readResult{n, err} }()
+		var n int
+		select {
+		case result := <-readDone:
+			n, err = result.n, result.err
+		case <-time.After(5 * time.Second):
+			udpConn.Close()
+			t.Fatalf("UDP echo size %d timed out", size)
+		}
 		if err != nil || !bytes.Equal(udpData[:n], payload) {
 			var echoSizes []int
 			for len(receivedDatagrams) > 0 {
