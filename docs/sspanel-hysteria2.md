@@ -68,12 +68,38 @@ so every field supported by Xray-core v26.3.27 remains available. The separate
 `portHopping` object controls deployment behavior and subscription output.
 
 When both port-hopping switches are enabled, XrayR first verifies that it is on
-Linux, that `iptables` (or `ip6tables` for an IPv6 listen address) is installed, and that the process has permission to
-read the NAT table. It then adds idempotent UDP `REDIRECT` rules and removes
+Linux and checks the firewall tools and NAT table permissions for every required
+address family. Wildcard `ListenIP` values (`0.0.0.0`, `::`, or an omitted value)
+use **both `iptables` and `ip6tables`**, matching Xray-core's Go `udp` wildcard
+listener on dual-stack systems. A concrete IPv4 address uses only `iptables`;
+a concrete IPv6 address uses only `ip6tables`. Both tools must be available and
+have NAT support and root/CAP_NET_ADMIN permissions for automatic dual-stack
+setup; missing IPv6 capabilities cause a clear activation error instead of
+silently installing only IPv4 rules. For a deliberately IPv4-only deployment,
+bind a concrete IPv4 address, or manage forwarding externally with
+`autoConfigureFirewall: false`. This feature does not require UFW.
+
+All required families are checked before existing rules are replaced. XrayR
+then adds idempotent UDP `REDIRECT` rules and removes
 them on node disable, configuration replacement, rollback, or shutdown. XrayR
-fails the node activation if the preflight or rule installation fails. With
+fails the node activation if the preflight or rule installation fails, and
+cleans up the new rules in both families after a partial installation failure. With
 `autoConfigureFirewall: false`, provision equivalent UDP forwarding outside
 XrayR.
+
+For example, forwarding `50000-55000` to the node's listening port `50000`
+creates a UDP `REDIRECT` in each family's NAT `PREROUTING` chain. Verify both:
+
+```sh
+iptables -t nat -S PREROUTING
+ip6tables -t nat -S PREROUTING
+ss -lunp
+```
+
+These NAT rules implement port redirection, not firewall access grants. Any host
+INPUT filtering, cloud security group, container port mapping, and IPv6 routing
+must separately permit the required UDP traffic. Existing unrelated rules,
+including Docker's rules, are not removed.
 
 Subscriptions are generated for Mihomo/Clash, sing-box, Xray JSON, the generic
 V2Ray URI list, and the dedicated `/sub/{token}/hysteria2` endpoint. Protocol-
