@@ -314,5 +314,5 @@ require (
 
 replace github.com/exoscale/egoscale => github.com/exoscale/egoscale v0.102.3
 
-// Official v26.9.9 plus the immutable TLS certificate/OCSP snapshot patch.
-replace github.com/xtls/xray-core => github.com/HoshinoNeko/Xray-core v1.260327.1-0.20260922194944-a2192dfad2be
+// Official v26.9.9 plus immutable TLS snapshots and Hysteria2 UDP integrity fixes.
+replace github.com/xtls/xray-core => github.com/HoshinoNeko/Xray-core v1.260327.1-0.20261004063026-3a4e3c4fb983
