@@ -1,13 +1,13 @@
 # Hysteria2 UDP integrity regression
 
 XrayR pins the public HoshinoNeko/Xray-core fork to commit
-`3a4e3c4fb9833632fe86cf2c1b44c5d68b462099`, based on upstream v26.9.9
+`7afd4a49d8d4cc1a06600a88e6c82a30528c2120`, based on upstream v26.10.31
 and retaining this fork's TLS certificate snapshot fixes. The dependency is a
 remote Go pseudo-version, not a local filesystem replacement.
 
 The core fixes QUIC fragment truncation, UDP packet handling above the regular
 8192-byte buffer, and the missing receiver in remote-only port hopping. See
-[the core implementation notes](https://github.com/HoshinoNeko/Xray-core/blob/3a4e3c4fb9833632fe86cf2c1b44c5d68b462099/docs/hysteria2-udp-datagram-fix.md).
+[the core implementation notes](https://github.com/HoshinoNeko/Xray-core/blob/7afd4a49d8d4cc1a06600a88e6c82a30528c2120/docs/security-v26.10.31.md).
 
 ## Run the regression
 

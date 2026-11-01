@@ -2,6 +2,8 @@ name: Cross-platform build check
 
 on:
   push:
+    # Tag publishing invokes this workflow through workflow_call below.
+    branches: ['**']
     paths:
       - '**/*.go'
       - go.mod
@@ -13,6 +15,7 @@ on:
       - Dockerfile
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -49,6 +52,11 @@ jobs:
           tags=""
           if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
           go build -mod=readonly -tags "$tags" -trimpath -ldflags "$ldflags" -o "$RUNNER_TEMP/XrayR"
+          go version -m "$RUNNER_TEMP/XrayR" > "$RUNNER_TEMP/build-info.txt"
+          if ! grep -E 'DefaultGODEBUG=.*multipathtcp=0' "$RUNNER_TEMP/build-info.txt"; then
+            echo "release binaries must disable MPTCP by default"
+            exit 1
+          fi
           if [ "$EDITION" != "full" ]; then
             go list -mod=readonly -tags "$tags" -deps . > "$RUNNER_TEMP/deps.txt"
             if grep -q '^github.com/go-acme/lego/' "$RUNNER_TEMP/deps.txt"; then
@@ -57,15 +65,18 @@ jobs:
             fi
           fi
           git diff --exit-code -- go.mod go.sum
-      - name: Certificate and Hysteria2 basic regression
+      - name: Enable MPTCP for the Linux security control group
+        if: matrix.target.os == 'linux'
+        run: |
+          test -f /proc/sys/net/mptcp/enabled
+          sudo sysctl -w net.mptcp.enabled=1
+      - name: Security, certificate and Hysteria2 integrity regression
         if: matrix.target.os == 'linux'
         env:
           CGO_ENABLED: '0'
           EDITION: ${{ matrix.edition }}
-        run: |
-          tags=""
-          if [ "$EDITION" != "full" ]; then tags="$EDITION"; fi
-          go test -mod=readonly -tags "$tags" ./common/mylego ./common/limiter ./service/controller ./app/mydispatcher ./panel -run '^(TestMinimal.*|TestCertMonitor.*|TestLazy.*|TestStaticInbound.*|TestBufferedReader.*|TestCustomInboundConnectivity|Test_merge|Test_needRenewal|TestHysteriaBasicConnectivity)$' -count=1 -timeout=90s
+          XRAY_REQUIRE_MPTCP_TEST: '1'
+        run: bash .github/build/security-regression.sh
       - name: Build image and smoke test (no publishing)
         if: matrix.target.os == 'linux'
         env:

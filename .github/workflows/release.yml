@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - master
+    # GitHub does not apply path filters to tag pushes.
+    tags:
+      - 'v*'
     paths:
       - "**/*.go"
       - "go.mod"
@@ -20,9 +23,65 @@ on:
   release:
     types: [ published ]
 
+permissions:
+  contents: read
+
 jobs:
 
+  verify:
+    uses: ./.github/workflows/build-check.yml
+
+  prepare-release:
+    needs: verify
+    if: github.repository == 'HoshinoNeko/XrayR' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Create a draft only after regression and platform checks pass
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const marker = `<!-- xrayr-security-release:${context.sha} -->`;
+            const releases = await github.paginate(github.rest.repos.listReleases, {...context.repo, per_page: 100});
+            let release = releases.find(candidate => candidate.tag_name === tag);
+            if (release) {
+              // Resume only this exact commit's own incomplete draft, never an existing publication.
+              if (!release.draft || !release.body?.includes(marker)) {
+                throw new Error(`Refusing to overwrite existing release ${tag}`);
+              }
+            } else {
+              ({data: release} = await github.rest.repos.createRelease({
+                ...context.repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+                name: `XrayR ${tag}`,
+                draft: true,
+                prerelease: false,
+                body: [
+                  marker,
+                  '## Security update',
+                  '- Updates the patched HoshinoNeko/Xray-core dependency to v26.10.31.',
+                  '- Disables MPTCP by default while retaining TLS certificate snapshot and Hysteria2 UDP integrity fixes.',
+                  '- Includes full and minimal binaries; supported full binaries use UPX --best --lzma.',
+                  '',
+                  'Disabling MPTCP reduces the demonstrated attack surface; it does not repair CVE-2026-98432 in the kernel. Update the host Linux/Android kernel as well.',
+                  '',
+                  'Published only after security regressions, cross-platform build checks, and all release asset builds succeed.'
+                ].join('\n')
+              }));
+            }
+            core.setOutput('release_id', String(release.id));
+
   build:
+    needs: [verify, prepare-release]
+    if: always() && github.repository == 'HoshinoNeko/XrayR' && needs.verify.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped')
+    permissions:
+      contents: write
     strategy:
       matrix:
         # Include amd64 on all platforms.
@@ -99,7 +158,7 @@ jobs:
       CGO_ENABLED: 0
     steps:
       - name: Checkout codebase
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Show workflow information
         id: get_filename
         run: |
@@ -109,7 +168,7 @@ jobs:
           echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -220,23 +279,29 @@ jobs:
           path: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-minimal/*
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
           tag: ${{ github.ref }}
+          release_id: ${{ needs.prepare-release.outputs.release_id || github.event.release.id }}
+          draft: ${{ github.event_name == 'push' }}
+          overwrite: ${{ github.event_name == 'push' }}
           file_glob: true
       - name: Upload minimal binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-minimal.zip*
           tag: ${{ github.ref }}
+          release_id: ${{ needs.prepare-release.outputs.release_id || github.event.release.id }}
+          draft: ${{ github.event_name == 'push' }}
+          overwrite: ${{ github.event_name == 'push' }}
           file_glob: true
       # Optional compressed copies: never overwrite or upload these to Releases.
       - name: Install UPX for Actions-only copies
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
         id: install_upx
         continue-on-error: true
         run: |
@@ -244,13 +309,32 @@ jobs:
           sudo apt-get install -y upx-ucl
           upx --version
       - name: Pack UPX copies
-        if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch') && steps.install_upx.outcome == 'success'
+        if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && steps.install_upx.outcome == 'success'
         run: bash .github/build/upx-artifacts.sh
       - name: Upload UPX copies to Actions only
-        if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch') && steps.install_upx.outcome == 'success'
+        if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && steps.install_upx.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}-upx
           path: ./upx_artifacts/*
           compression-level: 0
           if-no-files-found: error
+
+  publish-release:
+    needs: [prepare-release, build]
+    if: github.repository == 'HoshinoNeko/XrayR' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the completed draft without replacing another release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release_id = Number('${{ needs.prepare-release.outputs.release_id }}');
+            const {data: release} = await github.rest.repos.getRelease({...context.repo, release_id});
+            const tag = context.ref.replace('refs/tags/', '');
+            if (!release.draft || release.tag_name !== tag || !release.body?.includes(`<!-- xrayr-security-release:${context.sha} -->`)) {
+              throw new Error('Release no longer matches this verified draft');
+            }
+            await github.rest.repos.updateRelease({...context.repo, release_id, draft: false});
